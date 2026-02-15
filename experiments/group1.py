@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import json
+import random
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import config
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
+
+from core.agent.remote_agent import RemoteAgent
+
+TOP_K = 50
+TOP_P = None
+
+
+def sample_conversation_starters(sample_size: int, seed: int) -> list[str]:
+    dataset = load_dataset("Langame/conversation-starters", split="train")
+    all_starters = [str(x).strip() for x in dataset["prompt"] if str(x).strip()]
+    target_size = min(sample_size, len(all_starters))
+    rng = random.Random(seed)
+    return rng.sample(all_starters, k=target_size)
+
+
+def trim_recent_rounds(messages: list[dict[str, str]], window_rounds: int) -> None:
+    if not messages:
+        return
+    max_turn_messages = max(window_rounds * 2, 0)
+    has_system = messages[0].get("role") == "system"
+    prefix = messages[:1] if has_system else []
+    body = messages[1:] if has_system else messages[:]
+    if len(body) > max_turn_messages:
+        body = body[-max_turn_messages:]
+    messages[:] = [*prefix, *body]
+
+
+def sanitize_message_text(text: str, special_tokens: set[str]) -> str:
+    cleaned = text or ""
+    for token in special_tokens:
+        if token:
+            cleaned = cleaned.replace(token, "")
+    cleaned = re.sub(r"<\|[^|]+?\|>", "", cleaned)
+    return cleaned.strip()
+
+
+def generate_local_reply(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
+    messages: list[dict[str, str]],
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_k: int | None,
+    top_p: float | None,
+    special_tokens: set[str],
+) -> tuple[str, int, float]:
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+    gen_kwargs: dict[str, Any] = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": temperature > 0,
+        "temperature": temperature,
+        "pad_token_id": tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+    }
+    if tokenizer.eos_token_id is not None:
+        gen_kwargs["eos_token_id"] = tokenizer.eos_token_id
+    if top_k is not None:
+        gen_kwargs["top_k"] = top_k
+    if top_p is not None:
+        gen_kwargs["top_p"] = top_p
+
+    started_at = time.perf_counter()
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, **gen_kwargs)
+    generate_time_seconds = time.perf_counter() - started_at
+
+    prompt_len = inputs["input_ids"].shape[1]
+    generated_ids = output_ids[0, prompt_len:].tolist()
+    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
+    generated_text = sanitize_message_text(generated_text, special_tokens)
+    return generated_text, len(generated_ids), float(generate_time_seconds)
+
+
+def main() -> None:
+    model_path = config.ModelEnum.QWEN2_5_7B_INSTRUCT.value
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_path).cuda().eval()
+    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_path)
+    model_name = Path(str(model_path).rstrip("/\\")).name
+    special_tokens = set(getattr(tokenizer, "all_special_tokens", []) or [])
+
+    starters = sample_conversation_starters(config.SAMPLE_SIZE, config.RANDOM_SEED)
+
+    temperature = config.TEMPERATURE
+    max_new_tokens = config.MAX_NEW_TOKENS
+    seed = config.RANDOM_SEED
+
+    remote_agent = RemoteAgent(
+        model_name=config.REMOTE_AGENT,
+        api_key=config.OPENAI_API_KEY,
+        base_url=config.OPENAI_BASE_URL,
+    )
+
+    data_dir = PROJECT_ROOT / config.OUTPUT_DIR
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    for starter_id, starter in enumerate(starters, start=1):
+        for trial in range(1, config.REPEATS_PER_STARTER + 1):
+            dialog_record: dict[str, Any] = {
+                "time": int(time.time()),
+                "temperature": temperature,
+                "top_k": TOP_K,
+                "top_p": TOP_P,
+                "max_token": max_new_tokens,
+                "seed": seed,
+                "remote_agent": config.REMOTE_AGENT,
+                "rounds_per_dialog": config.ROUNDS_PER_DIALOGUE,
+                "window_size": config.WINDOW_ROUNDS,
+                "model": model_path,
+                "starter": starter,
+                "rounds": [],
+            }
+            trial_output_path = data_dir / f"group1-{model_name}-{config.WINDOW_ROUNDS}-{starter_id}-{trial}.json"
+
+            try:
+                remote_agent_messages: list[dict[str, str]] = []
+                local_agent_messages: list[dict[str, str]] = []
+                remote_agent_messages.append({"role": "system", "content": config.USER_AGENT_SYSTEM_PROMPT})
+                local_agent_messages.append({"role": "system", "content": config.ASSISTANT_AGENT_SYSTEM_PROMPT})
+
+                starter_message = {"role": "user", "content": starter}
+                remote_agent_messages.append(starter_message.copy())
+                local_agent_messages.append(starter_message.copy())
+                print(
+                    f"[starter {starter_id}/{len(starters)} | "
+                    f"trial {trial}/{config.REPEATS_PER_STARTER}]"
+                )
+
+                for round_idx in range(1, config.ROUNDS_PER_DIALOGUE + 1):
+                    print(f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] Starting round...")
+                    is_same_context = remote_agent_messages == local_agent_messages
+                    assistant_text, generated_token_count, generate_time_seconds = generate_local_reply(
+                        model,
+                        tokenizer,
+                        local_agent_messages.copy(),
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_k=TOP_K,
+                        top_p=TOP_P,
+                        special_tokens=special_tokens,
+                    )
+                    print(
+                        f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] "
+                        f"Generated assistant text with {generated_token_count} tokens."
+                    )
+
+                    carrier_assistant_message = {"role": "assistant", "content": assistant_text}
+                    remote_agent_messages.append(carrier_assistant_message.copy())
+                    local_agent_messages.append(carrier_assistant_message.copy())
+
+                    remote_reply = remote_agent.invoke(messages=remote_agent_messages, temperature=temperature)
+                    remote_reply = sanitize_message_text(remote_reply, special_tokens)
+                    remote_reply_message = {"role": "user", "content": remote_reply}
+                    remote_agent_messages.append(remote_reply_message.copy())
+                    local_agent_messages.append(remote_reply_message.copy())
+
+                    trim_recent_rounds(remote_agent_messages, config.WINDOW_ROUNDS)
+                    trim_recent_rounds(local_agent_messages, config.WINDOW_ROUNDS)
+
+                    dialog_record["rounds"].append(
+                        {
+                            "assistant": assistant_text,
+                            "user": remote_reply,
+                            "generated_token_count": generated_token_count,
+                            "generate_time_seconds": generate_time_seconds,
+                            "is_same_context": is_same_context,
+                        }
+                    )
+                    with trial_output_path.open("w", encoding="utf-8") as f:
+                        json.dump(dialog_record, f, ensure_ascii=False, indent=2)
+            finally:
+                with trial_output_path.open("w", encoding="utf-8") as f:
+                    json.dump(dialog_record, f, ensure_ascii=False, indent=2)
+
+
+if __name__ == "__main__":
+    main()
