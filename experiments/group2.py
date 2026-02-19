@@ -86,6 +86,44 @@ def resolve_algorithm(name: str) -> stegokit.StegoAlgorithm:
     raise ValueError(f"Unsupported algorithm: {name}")
 
 
+def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
+    rounds = dialog_record.get("rounds", [])
+    total_generated_token_count = int(
+        sum(int(round_item.get("generated_token_count", 0) or 0) for round_item in rounds)
+    )
+    weighted_entropy_sum = float(
+        sum(
+            float(round_item.get("average_entropy", 0.0) or 0.0)
+            * int(round_item.get("generated_token_count", 0) or 0)
+            for round_item in rounds
+        )
+    )
+    total_encode_time_seconds = float(
+        sum(float(round_item.get("encode_time_seconds", 0.0) or 0.0) for round_item in rounds)
+    )
+    total_decode_time_seconds = float(
+        sum(float(round_item.get("decode_time_seconds", 0.0) or 0.0) for round_item in rounds)
+    )
+
+    if total_generated_token_count > 0:
+        weighted_average_entropy = weighted_entropy_sum / total_generated_token_count
+        average_encode_time_per_token_seconds = total_encode_time_seconds / total_generated_token_count
+        average_decode_time_per_token_seconds = total_decode_time_seconds / total_generated_token_count
+    else:
+        weighted_average_entropy = 0.0
+        average_encode_time_per_token_seconds = 0.0
+        average_decode_time_per_token_seconds = 0.0
+
+    return {
+        "total_generated_token_count": total_generated_token_count,
+        "weighted_average_entropy": float(weighted_average_entropy),
+        "total_encode_time_seconds": total_encode_time_seconds,
+        "total_decode_time_seconds": total_decode_time_seconds,
+        "average_encode_time_per_token_seconds": float(average_encode_time_per_token_seconds),
+        "average_decode_time_per_token_seconds": float(average_decode_time_per_token_seconds),
+    }
+
+
 def main() -> None:
     args = parse_args()
     # 加载模型与分词器
@@ -268,11 +306,17 @@ def main() -> None:
                             "is_same_context": is_same_context,
                         }
                     )
+                    if len(dialog_record["rounds"]) >= config.ROUNDS_PER_DIALOGUE:
+                        dialog_record["metrics"] = build_dialog_metrics(dialog_record)
                     # 每轮结束立即落盘，便于实时观察 rounds 增长
                     with trial_output_path.open("w", encoding="utf-8") as f:
                         json.dump(dialog_record, f, ensure_ascii=False, indent=2)
             finally:
                 # 每个 trial 都落盘，避免中途异常导致数据丢失
+                if len(dialog_record.get("rounds", [])) >= config.ROUNDS_PER_DIALOGUE:
+                    dialog_record["metrics"] = build_dialog_metrics(dialog_record)
+                else:
+                    dialog_record.pop("metrics", None)
                 with trial_output_path.open("w", encoding="utf-8") as f:
                     json.dump(dialog_record, f, ensure_ascii=False, indent=2)
 

@@ -64,7 +64,7 @@ def generate_local_reply(
     top_k: int | None,
     top_p: float | None,
     special_tokens: set[str],
-) -> tuple[str, int, float]:
+) -> tuple[str, int, float, float]:
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
     gen_kwargs: dict[str, Any] = {
@@ -89,7 +89,71 @@ def generate_local_reply(
     generated_ids = output_ids[0, prompt_len:].tolist()
     generated_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
     generated_text = sanitize_message_text(generated_text, special_tokens)
-    return generated_text, len(generated_ids), float(generate_time_seconds)
+
+    average_entropy = 0.0
+    if generated_ids:
+        # Entropy is computed post-generation from logits only, so sampling behavior is unchanged.
+        with torch.no_grad():
+            logits = model(output_ids).logits[0]
+
+        per_step_entropy: list[float] = []
+        log2 = torch.log(torch.tensor(2.0, device=logits.device, dtype=logits.dtype))
+        full_vocab_size = logits.shape[-1]
+        for step_idx in range(len(generated_ids)):
+            step_logits = logits[prompt_len - 1 + step_idx]
+            probs = torch.softmax(step_logits / max(float(temperature), 1e-8), dim=-1)
+
+            if top_k is not None and top_k > 0 and top_k < full_vocab_size:
+                probs, _ = torch.topk(probs, k=top_k)
+
+            if top_p is not None and 0 < top_p < 1:
+                sorted_probs, _ = torch.sort(probs, descending=True)
+                cumsum = torch.cumsum(sorted_probs, dim=0)
+                keep = cumsum <= top_p
+                if keep.numel() > 0:
+                    keep[0] = True
+                probs = sorted_probs[keep]
+
+            probs = probs / probs.sum()
+            entropy = -(probs * (torch.log(probs) / log2)).sum()
+            entropy_value = float(entropy.item())
+            if entropy_value == entropy_value:
+                per_step_entropy.append(entropy_value)
+
+        average_entropy = float(sum(per_step_entropy) / len(per_step_entropy)) if per_step_entropy else 0.0
+
+    return generated_text, len(generated_ids), float(generate_time_seconds), average_entropy
+
+
+def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
+    rounds = dialog_record.get("rounds", [])
+    total_generated_token_count = int(
+        sum(int(round_item.get("generated_token_count", 0) or 0) for round_item in rounds)
+    )
+    weighted_entropy_sum = float(
+        sum(
+            float(round_item.get("average_entropy", 0.0) or 0.0)
+            * int(round_item.get("generated_token_count", 0) or 0)
+            for round_item in rounds
+        )
+    )
+    total_generate_time_seconds = float(
+        sum(float(round_item.get("generate_time_seconds", 0.0) or 0.0) for round_item in rounds)
+    )
+
+    if total_generated_token_count > 0:
+        weighted_average_entropy = weighted_entropy_sum / total_generated_token_count
+        average_generate_time_per_token_seconds = total_generate_time_seconds / total_generated_token_count
+    else:
+        weighted_average_entropy = 0.0
+        average_generate_time_per_token_seconds = 0.0
+
+    return {
+        "total_generated_token_count": total_generated_token_count,
+        "weighted_average_entropy": float(weighted_average_entropy),
+        "total_generate_time_seconds": total_generate_time_seconds,
+        "average_generate_time_per_token_seconds": float(average_generate_time_per_token_seconds),
+    }
 
 
 def main() -> None:
@@ -149,7 +213,7 @@ def main() -> None:
                 for round_idx in range(1, config.ROUNDS_PER_DIALOGUE + 1):
                     print(f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] Starting round...")
                     is_same_context = remote_agent_messages == local_agent_messages
-                    assistant_text, generated_token_count, generate_time_seconds = generate_local_reply(
+                    assistant_text, generated_token_count, generate_time_seconds, average_entropy = generate_local_reply(
                         model,
                         tokenizer,
                         local_agent_messages.copy(),
@@ -182,13 +246,20 @@ def main() -> None:
                             "assistant": assistant_text,
                             "user": remote_reply,
                             "generated_token_count": generated_token_count,
+                            "average_entropy": average_entropy,
                             "generate_time_seconds": generate_time_seconds,
                             "is_same_context": is_same_context,
                         }
                     )
+                    if len(dialog_record["rounds"]) >= config.ROUNDS_PER_DIALOGUE:
+                        dialog_record["metrics"] = build_dialog_metrics(dialog_record)
                     with trial_output_path.open("w", encoding="utf-8") as f:
                         json.dump(dialog_record, f, ensure_ascii=False, indent=2)
             finally:
+                if len(dialog_record.get("rounds", [])) >= config.ROUNDS_PER_DIALOGUE:
+                    dialog_record["metrics"] = build_dialog_metrics(dialog_record)
+                else:
+                    dialog_record.pop("metrics", None)
                 with trial_output_path.open("w", encoding="utf-8") as f:
                     json.dump(dialog_record, f, ensure_ascii=False, indent=2)
 
