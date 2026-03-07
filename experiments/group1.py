@@ -19,6 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from core.agent.remote_agent import RemoteAgent
+from core.tools import entropy_tools
 from core.tools import starter_dataset
 
 def sample_conversation_starters(sample_size: int, seed: int) -> list[tuple[int, str]]:
@@ -100,37 +101,15 @@ def generate_local_reply(
     generated_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
     generated_text = sanitize_message_text(generated_text, special_tokens)
 
-    average_entropy = 0.0
-    if generated_ids:
-        # Entropy is computed post-generation from logits only, so sampling behavior is unchanged.
-        with torch.no_grad():
-            logits = model(output_ids).logits[0]
-
-        per_step_entropy: list[float] = []
-        log2 = torch.log(torch.tensor(2.0, device=logits.device, dtype=logits.dtype))
-        full_vocab_size = logits.shape[-1]
-        for step_idx in range(len(generated_ids)):
-            step_logits = logits[prompt_len - 1 + step_idx]
-            probs = torch.softmax(step_logits / max(float(temperature), 1e-8), dim=-1)
-
-            if top_k is not None and top_k > 0 and top_k < full_vocab_size:
-                probs, _ = torch.topk(probs, k=top_k)
-
-            if top_p is not None and 0 < top_p < 1:
-                sorted_probs, _ = torch.sort(probs, descending=True)
-                cumsum = torch.cumsum(sorted_probs, dim=0)
-                keep = cumsum <= top_p
-                if keep.numel() > 0:
-                    keep[0] = True
-                probs = sorted_probs[keep]
-
-            probs = probs / probs.sum()
-            entropy = -(probs * (torch.log(probs) / log2)).sum()
-            entropy_value = float(entropy.item())
-            if entropy_value == entropy_value:
-                per_step_entropy.append(entropy_value)
-
-        average_entropy = float(sum(per_step_entropy) / len(per_step_entropy)) if per_step_entropy else 0.0
+    average_entropy = entropy_tools.compute_average_entropy_for_generated_ids(
+        model,
+        tokenizer,
+        messages,
+        generated_ids,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+    )
 
     return generated_text, len(generated_ids), float(generate_time_seconds), average_entropy
 

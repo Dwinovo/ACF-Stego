@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from core.agent.remote_agent import RemoteAgent
+from core.tools import entropy_tools
 from core.tools import starter_dataset
 
 # Stego params (group4-local)
@@ -278,7 +279,15 @@ def main() -> None:
                     generated_token_count = len(generated_token_ids)
                     encode_time_seconds = float(getattr(stego_result, "encode_time_seconds", 0.0) or 0.0)
                     decode_time_seconds = float(getattr(stego_decode_result, "decode_time_seconds", 0.0) or 0.0)
-                    average_entropy = float(getattr(stego_result, "average_entropy", 0.0) or 0.0)
+                    average_entropy = entropy_tools.compute_average_entropy_for_generated_ids(
+                        model,
+                        tokenizer,
+                        encode_messages,
+                        generated_token_ids,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                    )
                     embedding_capacity = float(getattr(stego_result, "embedding_capacity", 0.0) or 0.0)
 
                     # 推进一轮对话：assistant -> remote user
