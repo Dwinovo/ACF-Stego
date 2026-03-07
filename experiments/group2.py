@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import random
 import re
@@ -9,44 +8,27 @@ import time
 from pathlib import Path
 from typing import Any
 
+import torch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
 import stegokit
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from core.agent.remote_agent import RemoteAgent
+from core.tools import starter_dataset
 
 # Stego params (group2-local)
-DEFAULT_ALGORITHM = "discop"
-STEGO_TOP_K = 50
-STEGO_TOP_P = None
-# DISCOP / METEOR 建议使用较低 precision（官方示例为 16）
-STEGO_PRECISION = 16
+STEGO_ALGORITHM = stegokit.StegoAlgorithm.DISCOP
 STEGO_STOP_ON_EOS = True
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Group2 with selectable stego algorithm.")
-    parser.add_argument(
-        "--algorithm",
-        choices=("discop", "meteor"),
-        default=DEFAULT_ALGORITHM,
-        help="Stego algorithm for group2. Default: discop",
-    )
-    return parser.parse_args()
-
-
-def sample_conversation_starters(sample_size: int, seed: int) -> list[str]:
-    dataset = load_dataset("Langame/conversation-starters", split="train")
-    all_starters = [str(x).strip() for x in dataset["prompt"] if str(x).strip()]
-    target_size = min(sample_size, len(all_starters))
-    rng = random.Random(seed)
-    return rng.sample(all_starters, k=target_size)
+def sample_conversation_starters(sample_size: int, seed: int) -> list[tuple[int, str]]:
+    return starter_dataset.sample_absolute_id_starters(sample_size, seed)
 
 
 def generate_random_bitstring(length: int, seed: int | str) -> str:
@@ -68,6 +50,24 @@ def trim_recent_rounds(messages: list[dict[str, str]], window_rounds: int) -> No
     messages[:] = [*prefix, *body]
 
 
+def contexts_equal_ignoring_system(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    def normalize(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for message in messages:
+            role = str(message.get("role", "")).lower()
+            if role == "system":
+                continue
+            normalized.append(
+                {
+                    "role": role,
+                    "content": str(message.get("content", "")),
+                }
+            )
+        return normalized
+
+    return normalize(left) == normalize(right)
+
+
 def sanitize_message_text(text: str, special_tokens: set[str]) -> str:
     cleaned = text or ""
     for token in special_tokens:
@@ -75,15 +75,6 @@ def sanitize_message_text(text: str, special_tokens: set[str]) -> str:
             cleaned = cleaned.replace(token, "")
     cleaned = re.sub(r"<\|[^|]+?\|>", "", cleaned)
     return cleaned.strip()
-
-
-def resolve_algorithm(name: str) -> stegokit.StegoAlgorithm:
-    normalized = name.strip().lower()
-    if normalized == "discop":
-        return stegokit.StegoAlgorithm.DISCOP
-    if normalized == "meteor":
-        return stegokit.StegoAlgorithm.METEOR
-    raise ValueError(f"Unsupported algorithm: {name}")
 
 
 def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
@@ -125,10 +116,13 @@ def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    args = parse_args()
     # 加载模型与分词器
     model_path = config.ModelEnum.QWEN2_5_7B_INSTRUCT.value
-    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_path).cuda().eval()
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+    ).cuda().eval()
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_path)
     # 模型名字，保存记录要用
     model_name = Path(str(model_path).rstrip("/\\")).name
@@ -150,17 +144,18 @@ def main() -> None:
         base_url=config.OPENAI_BASE_URL,
     )
 
-    data_dir = PROJECT_ROOT / config.OUTPUT_DIR
+    data_dir = PROJECT_ROOT / config.OUTPUT_DIR / "group2"
     data_dir.mkdir(parents=True, exist_ok=True)
     # 参数设置
-    algorithm = resolve_algorithm(args.algorithm)
-    top_k = STEGO_TOP_K
-    top_p = STEGO_TOP_P
-    precision = STEGO_PRECISION
+    algorithm = STEGO_ALGORITHM
+    top_k = int(config.TOP_K)
+    raw_top_p = float(config.TOP_P)
+    top_p = None if raw_top_p <= 0 else raw_top_p
+    precision = int(config.STEGO_PRECISION)
     stop_on_eos = STEGO_STOP_ON_EOS
 
     # 外层按 starter、内层按重复次数组织实验
-    for starter_id, starter in enumerate(starters, start=1):
+    for starter_pos, (starter_id, starter) in enumerate(starters, start=1):
         for trial in range(1, config.REPEATS_PER_STARTER + 1):
             dialog_record: dict[str, Any] = {
                 "algo": algorithm.name,
@@ -174,7 +169,7 @@ def main() -> None:
                 "model": model_path,
                 "starter": starter,
                 "stego_top_k": top_k,
-                "stego_top_p": top_p,
+                "stego_top_p": raw_top_p,
                 "stego_precision": precision,
                 "stego_stop_on_eos": stop_on_eos,
                 "rounds": [],
@@ -196,7 +191,7 @@ def main() -> None:
                 remote_agent_messages.append(starter_message.copy())
                 local_agent_messages.append(starter_message.copy())
                 print(
-                    f"[starter {starter_id}/{len(starters)} | "
+                    f"[starter {starter_pos}/{len(starters)} abs_id={starter_id} | "
                     f"trial {trial}/{config.REPEATS_PER_STARTER}]"
                 )
                 for round_idx in range(1, config.ROUNDS_PER_DIALOGUE + 1):
@@ -205,12 +200,13 @@ def main() -> None:
                     bit_seed = f"{seed}:{starter_id}:{trial}:{round_idx}"
                     bitstream = generate_random_bitstring(secret_bits_length, seed=bit_seed)
                     # 隐写编码生成 assistant 文本
+                    encode_messages = local_agent_messages.copy()
                     stegoencode_context = stegokit.StegoEncodeContext(
                         algorithm=algorithm,
                         model=model,
                         tokenizer=tokenizer,
                         secret_bits=bitstream,
-                        messages=local_agent_messages.copy(),
+                        messages=encode_messages,
                         max_new_tokens=max_new_tokens,
                         temperature=temperature,
                         top_k=top_k,
@@ -235,16 +231,16 @@ def main() -> None:
                     )
                     print(f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] Encode bits: {embedded_bits}")
 
-                    # 记录一下上下文是否一致，不包含system信息
-                    is_same_context = remote_agent_messages == local_agent_messages
                     # 解码
+                    decode_messages = local_agent_messages.copy()
+                    is_same_context = contexts_equal_ignoring_system(encode_messages, decode_messages)
                     stegodecode_context = stegokit.StegoDecodeContext(
                         algorithm=algorithm,
                         model=model,
                         tokenizer=tokenizer,
                         generated_token_ids=generated_token_ids,
                         # DISCOP / METEOR 对上下文极敏感，解码必须与编码使用完全一致的消息上下文。
-                        messages=local_agent_messages.copy(),
+                        messages=decode_messages,
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,

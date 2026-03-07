@@ -15,22 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from core.agent.remote_agent import RemoteAgent
+from core.tools import starter_dataset
 
-TOP_K = 50
-TOP_P = None
-
-
-def sample_conversation_starters(sample_size: int, seed: int) -> list[str]:
-    dataset = load_dataset("Langame/conversation-starters", split="train")
-    all_starters = [str(x).strip() for x in dataset["prompt"] if str(x).strip()]
-    target_size = min(sample_size, len(all_starters))
-    rng = random.Random(seed)
-    return rng.sample(all_starters, k=target_size)
+def sample_conversation_starters(sample_size: int, seed: int) -> list[tuple[int, str]]:
+    return starter_dataset.sample_absolute_id_starters(sample_size, seed)
 
 
 def trim_recent_rounds(messages: list[dict[str, str]], window_rounds: int) -> None:
@@ -43,6 +35,24 @@ def trim_recent_rounds(messages: list[dict[str, str]], window_rounds: int) -> No
     if len(body) > max_turn_messages:
         body = body[-max_turn_messages:]
     messages[:] = [*prefix, *body]
+
+
+def contexts_equal_ignoring_system(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    def normalize(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for message in messages:
+            role = str(message.get("role", "")).lower()
+            if role == "system":
+                continue
+            normalized.append(
+                {
+                    "role": role,
+                    "content": str(message.get("content", "")),
+                }
+            )
+        return normalized
+
+    return normalize(left) == normalize(right)
 
 
 def sanitize_message_text(text: str, special_tokens: set[str]) -> str:
@@ -158,7 +168,11 @@ def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     model_path = config.ModelEnum.QWEN2_5_7B_INSTRUCT.value
-    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_path).cuda().eval()
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+    ).cuda().eval()
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_path)
     model_name = Path(str(model_path).rstrip("/\\")).name
     special_tokens = set(getattr(tokenizer, "all_special_tokens", []) or [])
@@ -167,6 +181,9 @@ def main() -> None:
 
     temperature = config.TEMPERATURE
     max_new_tokens = config.MAX_NEW_TOKENS
+    top_k = int(config.TOP_K)
+    top_p = float(config.TOP_P)
+    top_p_value = None if top_p <= 0 else top_p
     seed = config.RANDOM_SEED
 
     remote_agent = RemoteAgent(
@@ -175,16 +192,16 @@ def main() -> None:
         base_url=config.OPENAI_BASE_URL,
     )
 
-    data_dir = PROJECT_ROOT / config.OUTPUT_DIR
+    data_dir = PROJECT_ROOT / config.OUTPUT_DIR / "group1"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    for starter_id, starter in enumerate(starters, start=1):
+    for starter_pos, (starter_id, starter) in enumerate(starters, start=1):
         for trial in range(1, config.REPEATS_PER_STARTER + 1):
             dialog_record: dict[str, Any] = {
                 "time": int(time.time()),
                 "temperature": temperature,
-                "top_k": TOP_K,
-                "top_p": TOP_P,
+                "top_k": top_k,
+                "top_p": top_p,
                 "max_token": max_new_tokens,
                 "seed": seed,
                 "remote_agent": config.REMOTE_AGENT,
@@ -206,21 +223,21 @@ def main() -> None:
                 remote_agent_messages.append(starter_message.copy())
                 local_agent_messages.append(starter_message.copy())
                 print(
-                    f"[starter {starter_id}/{len(starters)} | "
+                    f"[starter {starter_pos}/{len(starters)} abs_id={starter_id} | "
                     f"trial {trial}/{config.REPEATS_PER_STARTER}]"
                 )
 
                 for round_idx in range(1, config.ROUNDS_PER_DIALOGUE + 1):
                     print(f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] Starting round...")
-                    is_same_context = remote_agent_messages == local_agent_messages
+                    is_same_context = contexts_equal_ignoring_system(remote_agent_messages, local_agent_messages)
                     assistant_text, generated_token_count, generate_time_seconds, average_entropy = generate_local_reply(
                         model,
                         tokenizer,
                         local_agent_messages.copy(),
                         max_new_tokens=max_new_tokens,
                         temperature=temperature,
-                        top_k=TOP_K,
-                        top_p=TOP_P,
+                        top_k=top_k,
+                        top_p=top_p_value,
                         special_tokens=special_tokens,
                     )
                     print(

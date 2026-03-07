@@ -8,34 +8,27 @@ import time
 from pathlib import Path
 from typing import Any
 
+import torch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
 import stegokit
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from core.agent.remote_agent import RemoteAgent
+from core.tools import starter_dataset
 
 # Stego params (group3-local)
-STEGO_ALGORITHM = stegokit.StegoAlgorithm.ASYMMETRIC
-STEGO_TOP_K = 50
-STEGO_TOP_P = None
-STEGO_PRECISION = 52
+STEGO_ALGORITHM = stegokit.StegoAlgorithm.METEOR
 STEGO_STOP_ON_EOS = True
-STEGO_SECURE_PARAMETER = 32
-STEGO_FUNC_TYPE = 0
 
 
-def sample_conversation_starters(sample_size: int, seed: int) -> list[str]:
-    dataset = load_dataset("Langame/conversation-starters", split="train")
-    all_starters = [str(x).strip() for x in dataset["prompt"] if str(x).strip()]
-    target_size = min(sample_size, len(all_starters))
-    rng = random.Random(seed)
-    return rng.sample(all_starters, k=target_size)
+def sample_conversation_starters(sample_size: int, seed: int) -> list[tuple[int, str]]:
+    return starter_dataset.sample_absolute_id_starters(sample_size, seed)
 
 
 def generate_random_bitstring(length: int, seed: int | str) -> str:
@@ -55,6 +48,24 @@ def trim_recent_rounds(messages: list[dict[str, str]], window_rounds: int) -> No
     if len(body) > max_turn_messages:
         body = body[-max_turn_messages:]
     messages[:] = [*prefix, *body]
+
+
+def contexts_equal_ignoring_system(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    def normalize(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for message in messages:
+            role = str(message.get("role", "")).lower()
+            if role == "system":
+                continue
+            normalized.append(
+                {
+                    "role": role,
+                    "content": str(message.get("content", "")),
+                }
+            )
+        return normalized
+
+    return normalize(left) == normalize(right)
 
 
 def sanitize_message_text(text: str, special_tokens: set[str]) -> str:
@@ -107,7 +118,11 @@ def build_dialog_metrics(dialog_record: dict[str, Any]) -> dict[str, Any]:
 def main() -> None:
     # 加载模型与分词器
     model_path = config.ModelEnum.QWEN2_5_7B_INSTRUCT.value
-    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_path).cuda().eval()
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+    ).cuda().eval()
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_path)
     # 模型名字，保存记录要用
     model_name = Path(str(model_path).rstrip("/\\")).name
@@ -129,19 +144,18 @@ def main() -> None:
         base_url=config.OPENAI_BASE_URL,
     )
 
-    data_dir = PROJECT_ROOT / config.OUTPUT_DIR
+    data_dir = PROJECT_ROOT / config.OUTPUT_DIR / "group3"
     data_dir.mkdir(parents=True, exist_ok=True)
     # 参数设置
     algorithm = STEGO_ALGORITHM
-    top_k = STEGO_TOP_K
-    top_p = STEGO_TOP_P
-    precision = STEGO_PRECISION
+    top_k = int(config.TOP_K)
+    raw_top_p = float(config.TOP_P)
+    top_p = None if raw_top_p <= 0 else raw_top_p
+    precision = int(config.STEGO_PRECISION)
     stop_on_eos = STEGO_STOP_ON_EOS
-    secure_parameter = STEGO_SECURE_PARAMETER
-    func_type = STEGO_FUNC_TYPE
 
     # 外层按 starter、内层按重复次数组织实验
-    for starter_id, starter in enumerate(starters, start=1):
+    for starter_pos, (starter_id, starter) in enumerate(starters, start=1):
         for trial in range(1, config.REPEATS_PER_STARTER + 1):
             dialog_record: dict[str, Any] = {
                 "algo": algorithm.name,
@@ -155,15 +169,14 @@ def main() -> None:
                 "model": model_path,
                 "starter": starter,
                 "stego_top_k": top_k,
-                "stego_top_p": top_p,
+                "stego_top_p": raw_top_p,
                 "stego_precision": precision,
-                "stego_secure_parameter": secure_parameter,
-                "stego_func_type": func_type,
+                "stego_stop_on_eos": stop_on_eos,
                 "rounds": [],
             }
             trial_output_path = (
                 data_dir
-                / f"group3-{model_name}-{config.WINDOW_ROUNDS}-{starter_id}-{trial}.json"
+                / f"group3-{algorithm.value}-{model_name}-{algorithm.name}-{config.WINDOW_ROUNDS}-{starter_id}-{trial}.json"
             )
 
             try:
@@ -178,7 +191,7 @@ def main() -> None:
                 remote_agent_messages.append(starter_message.copy())
                 local_agent_messages.append(starter_message.copy())
                 print(
-                    f"[starter {starter_id}/{len(starters)} | "
+                    f"[starter {starter_pos}/{len(starters)} abs_id={starter_id} | "
                     f"trial {trial}/{config.REPEATS_PER_STARTER}]"
                 )
                 for round_idx in range(1, config.ROUNDS_PER_DIALOGUE + 1):
@@ -187,24 +200,20 @@ def main() -> None:
                     bit_seed = f"{seed}:{starter_id}:{trial}:{round_idx}"
                     bitstream = generate_random_bitstring(secret_bits_length, seed=bit_seed)
                     # 隐写编码生成 assistant 文本
+                    encode_messages = local_agent_messages.copy()
                     stegoencode_context = stegokit.StegoEncodeContext(
                         algorithm=algorithm,
                         model=model,
                         tokenizer=tokenizer,
                         secret_bits=bitstream,
-                        messages=local_agent_messages.copy(),
+                        messages=encode_messages,
                         max_new_tokens=max_new_tokens,
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
-                        prg=None,
+                        prg=stegokit.PRG.from_int_seed(seed),
                         precision=precision,
                         stop_on_eos=stop_on_eos,
-                        extra={
-                            "seed": seed,
-                            "secure_parameter": secure_parameter,
-                            "func_type": func_type,
-                        },
                     )
                     stego_result: stegokit.StegoEncodeResult = stego_dispatcher.dispatch_encode(stegoencode_context)
                     # 嵌入的比特数量
@@ -213,7 +222,8 @@ def main() -> None:
                     generated_text = sanitize_message_text(stego_result.text, special_tokens)
                     # 保存token ids，后续解码用
                     generated_token_ids = stego_result.generated_token_ids
-                    embedded_bits = bitstream[:consumed_bits]
+                    compared_bits_len = min(consumed_bits, len(bitstream))
+                    embedded_bits = bitstream[:compared_bits_len]
 
                     print(
                         f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] "
@@ -221,30 +231,27 @@ def main() -> None:
                     )
                     print(f"  [Round {round_idx}/{config.ROUNDS_PER_DIALOGUE}] Encode bits: {embedded_bits}")
 
-                    # 记录一下上下文是否一致，不包含system信息
-                    is_same_context = remote_agent_messages == local_agent_messages
                     # 解码
+                    decode_messages = local_agent_messages.copy()
+                    is_same_context = contexts_equal_ignoring_system(encode_messages, decode_messages)
                     stegodecode_context = stegokit.StegoDecodeContext(
                         algorithm=algorithm,
                         model=model,
                         tokenizer=tokenizer,
                         generated_token_ids=generated_token_ids,
-                        messages=local_agent_messages.copy(),
+                        # DISCOP / METEOR 对上下文极敏感，解码必须与编码使用完全一致的消息上下文。
+                        messages=decode_messages,
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
-                        prg=None,
+                        prg=stegokit.PRG.from_int_seed(seed),
                         precision=precision,
-                        extra={
-                            "seed": seed,
-                            "secure_parameter": secure_parameter,
-                            "func_type": func_type,
-                        },
+                        max_bits=compared_bits_len,
                     )
                     stego_decode_result: stegokit.StegoDecodeResult = stego_dispatcher.dispatch_decode(stegodecode_context)
                     recovered_all_bits = stego_decode_result.bits or ""
-                    if consumed_bits > 0:
-                        recovered_bits = recovered_all_bits[:consumed_bits]
+                    if compared_bits_len > 0:
+                        recovered_bits = recovered_all_bits[:compared_bits_len]
                         is_correct = recovered_bits == embedded_bits
                     else:
                         recovered_bits = recovered_all_bits
@@ -286,6 +293,7 @@ def main() -> None:
                             "recover_bits": recovered_bits,
                             "is_correct": is_correct,
                             "consumed_bits": consumed_bits,
+                            "compared_bits_len": compared_bits_len,
                             "generated_token_count": generated_token_count,
                             "average_entropy": average_entropy,
                             "embedding_capacity": embedding_capacity,

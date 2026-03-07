@@ -1,5 +1,4 @@
 datasets
-mem0
 openai
 python-dotenv
 stegokit

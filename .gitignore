@@ -45,4 +45,6 @@ qdrant/
 data/
 results/logs/
 results/outputs/
-assets/fonts/
+assets/
+docs/
+index/
