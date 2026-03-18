@@ -1,239 +1,133 @@
 # SPL2026Priv
 
-## Project Layout
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#1-environment-setup)
 
-- `config/`: split configuration package
-- `config/experiment.py`: experiment hyperparameters
-- `config/runtime.py`: model/runtime/API settings
-- `config/dataset.py`: dataset version and reproduction metadata
-- `config/paths.py`: path constants
-- `config/prompts.py`: prompt constants
-- `config/models.py`: model enum and model-path helpers
-- `core/tools/`: LongMemEval loading, retrieval, QA metrics, analysis helpers
-- `experiments/`: V2 experiment entry scripts
-- `scripts/score_v2_llm_judge.py`: post-hoc semantic LLM judge
-- `scripts/analyze_v2_outputs.py`: aggregate raw outputs into summaries, CSV tables, and plot data
-- `scripts/generate_v2_figures.py`: render paper figures from aggregated artifacts (PDF only by default, no baked-in titles)
-- `scripts/report_v2_tables.py`: terminal preview for aggregated tables
-- `data/raw/`: cached LongMemEval payload
-- `data/outputs_v2/realistic/`: realistic cognitive asymmetry outputs by `group1` ... `group7`
-- `data/outputs_v2/controlled/`: controlled cognitive asymmetry outputs by `group2` ... `group4`
-- `data/outputs_v2/controlled_sweep/`: drift severity sweep outputs by `group2` ... `group4`
-- `data/outputs_v2/controlled_summary/`: encoder-only summary asymmetry outputs by `group2` ... `group4`
-- `data/table/v2/`: aggregated summaries, CSV tables, and plot json
+An anonymized replication package for SPL 2026 experiments on LongMemEval-based communication asymmetry benchmarks.
 
-## Configuration
+## Table of Contents
+- [Directory Structure](#directory-structure)
+- [Quick Start](#quick-start)
+- [Experiment Outputs](#experiment-outputs)
+- [Anonymous Release Checklist](#anonymous-release-checklist)
 
-Runtime config is Python-based in the `config/` package. Existing code still uses `import config`, but the implementation is now split by concern.
+## Directory Structure
 
-API credentials are read from `.env` / environment variables:
+```text
+SPL2026Priv/
+├── config/                          # Runtime, dataset, model, and experiment configs
+│   ├── runtime.py                   # API/runtime environment variable bindings
+│   ├── dataset.py                   # Dataset source and cache settings
+│   ├── experiment.py                # Experimental stage/sample hyperparameters
+│   ├── models.py                    # Model alias -> model path/model id resolver
+│   └── paths.py                     # Canonical project paths
+├── core/tools/                      # LongMemEval utilities, retrieval, and metrics
+├── experiments/                     # Main experiment entry points (group1...group8, controlled)
+├── scripts/
+│   ├── run_v2_pipeline.sh           # One-command experiment pipeline
+│   ├── score_v2_llm_judge.py        # Semantic LLM judge for realistic outputs
+│   ├── analyze_v2_outputs.py        # Aggregate JSON outputs into paper tables/plots
+│   ├── generate_v2_figures.py       # Render publication-ready figures
+│   └── report_v2_tables.py          # Terminal preview for summary tables
+├── tests/                           # Unit tests for analysis/metrics tools
+├── .env.example                     # Environment variable template (safe placeholders)
+├── requirements.txt                 # Python dependencies
+├── LICENSE                          # MIT license (Anonymous Authors)
+└── README.md
+```
 
+## Quick Start
+
+### 1. Environment Setup
+
+```bash
+conda create -n spl2026priv python=3.10 -y
+conda activate spl2026priv
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Fill `.env` with your own secrets before running remote APIs:
 - `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `REMOTE_EMBED_MODEL`
-- `REMOTE_RERANK_MODEL`
-- `REMOTE_RERANK_ENDPOINT`
-- `LLM_JUDGE_MODEL`
+- `HF_TOKEN`
 
-Key experiment knobs:
+### 2. Dataset Setup
 
-- `EXPERIMENT_STAGE=debug|pilot|formal|recommended`
-- `LONGMEMEVAL_REALISTIC_SAMPLE_SIZE`
-- `LONGMEMEVAL_CONTROLLED_SAMPLE_SIZE`
-- `LONGMEMEVAL_CONTROLLED_SUMMARY_SAMPLE_SIZE`
-- `LONGMEMEVAL_CONTROLLED_SUMMARY_NOTE_MAX_TOKENS`
-- `LONGMEMEVAL_CONTROLLED_SWEEP_SAMPLE_SIZE`
-- `LONGMEMEVAL_CONTROLLED_SWEEP_KEEP_SESSIONS`
-- `LONGMEMEVAL_WINDOW_SESSIONS`
-- `LONGMEMEVAL_DRIFT_KEEP_SESSIONS`
-- `LONGMEMEVAL_MAX_PROMPT_TOKENS`
-- `LONGMEMEVAL_RETRIEVAL_MAX_TOKENS`
-- `SKIP_EXISTING_OUTPUTS=0|1` (default `1`)
-- `SECRET_BITS_LENGTH` (default `2000`, used as an upper-bound secret reservoir)
+Official download link (LongMemEval-S cleaned):
+- https://huggingface.co/datasets/LIXINYI33/longmemeval-s/resolve/main/longmemeval_s_cleaned.json
 
-Workflow presets:
+Download and place the dataset at the expected path:
 
-- `debug`: realistic `20`, controlled `20`, repeats `1`
-- `pilot`: realistic `100`, controlled `50`, repeats `2`
-- `formal`: realistic `500`, controlled `50`, repeats `3`
-- `recommended`: realistic `120`, controlled `50`, repeats `3`
+```bash
+mkdir -p data/raw
+wget -O data/raw/longmemeval_s_cleaned.json \
+  "https://huggingface.co/datasets/LIXINYI33/longmemeval-s/resolve/main/longmemeval_s_cleaned.json"
+```
 
-`LONGMEMEVAL_REALISTIC_SAMPLE_SIZE`, `LONGMEMEVAL_CONTROLLED_SAMPLE_SIZE`, and `LONGMEMEVAL_REPEATS` still override the stage defaults if you set them explicitly.
+Expected path:
+- `data/raw/longmemeval_s_cleaned.json`
 
-Default behavior keeps existing experiment outputs:
+### 3. Run Main Experiments
 
-- experiment runs keep existing group JSON outputs and skip records whose target JSON already exists
-- LLM judge overwrites previous judge fields unless you pass `--skip-existing`
-- aggregation overwrites summaries, CSV tables, and plot data for the same suffix
-
-## Run Experiments
-
-Typical workflow:
-
-1. Debug
-   `EXPERIMENT_STAGE=debug`
-2. Pilot
-   `EXPERIMENT_STAGE=pilot`
-3. Formal
-   `EXPERIMENT_STAGE=formal`
-4. Paper-friendly recommended run for this project
-   `EXPERIMENT_STAGE=recommended`
-
-One-command pipeline:
+One-command full pipeline (recommended paper profile):
 
 ```bash
 bash scripts/run_v2_pipeline.sh --stage recommended
 ```
 
-Debug example:
+This runs:
+- Controlled suite (`v2_controlled_asymmetry`)
+- Realistic suite (`group1` ... `group8`)
+- Semantic LLM judging for realistic outputs
+- Aggregation for final tables and plot JSON
+
+Useful alternatives:
 
 ```bash
+# Fast debug run
 bash scripts/run_v2_pipeline.sh --stage debug --judge-limit 20 --analysis-suffix debug
-```
 
-Run the full controlled suite:
-
-```bash
-python -m experiments.v2_controlled_asymmetry
-```
-
-This sequentially runs:
-
-- `controlled`: `no_drift + drift_recent3`
-- `controlled_summary`: `summary_only_enc`
-- `controlled_sweep`: `recent5 -> recent4 -> recent3 -> recent2 -> recent1`
-
-If you need to rerun only one controlled sub-experiment:
-
-```bash
-python -m experiments.v2_controlled_drift_sweep
-python -m experiments.v2_controlled_summary
-```
-
-Run realistic Group1 baseline:
-
-```bash
-python -m experiments.v2_group1
-```
-
-Run realistic Group2 (DISCOP):
-
-```bash
-python -m experiments.v2_group2
-```
-
-Run realistic Group3 (METEOR):
-
-```bash
-python -m experiments.v2_group3
-```
-
-Run realistic Group4 (asymmetric):
-
-```bash
-python -m experiments.v2_group4
-```
-
-Run realistic Group5 (asymmetric + retrieval):
-
-```bash
-python -m experiments.v2_group5
-```
-
-Run realistic Group6 (DISCOP + retrieval):
-
-```bash
-python -m experiments.v2_group6
-```
-
-Run realistic Group7 (METEOR + retrieval):
-
-```bash
-python -m experiments.v2_group7
-```
-
-The realistic experiment is the main system evaluation and now keeps only the `no_drift` condition.
-
-## LLM Judge
-
-Score realistic outputs with the semantic judge:
-
-```bash
-python scripts/score_v2_llm_judge.py --experiment realistic
-```
-
-Score only the no-drift outputs for one group:
-
-```bash
-python scripts/score_v2_llm_judge.py --experiment realistic --only-group group6 --condition no_drift
-```
-
-The intended paper workflow is:
-
-- `controlled`: no LLM judge; focus on `BER` and `DecodeSuccess`
-- `realistic`: run LLM judge and use `LLMJudgeCorrect` / `LLMJudgeScore` as the main task metrics
-- `EM/F1`: keep them as legacy benchmark-reference metrics
-
-For stego groups, `SECRET_BITS_LENGTH=2000` is only a reservoir upper bound. Actual protocol comparison uses the consumed prefix reported in each run record via `consumed_bits`, and BER is computed on that actually embedded prefix rather than on the nominal 2000-bit budget.
-Capacity is reported as embedded bits per 1k generated tokens (`bits/1kTok`).
-
-## Analysis
-
-Aggregate the full experiment suite into paper artifacts:
-
-```bash
+# Re-run only aggregation
 python scripts/analyze_v2_outputs.py --experiment all
-```
 
-Generate paper figures:
-
-```bash
+# Generate paper figures from aggregated artifacts
 python scripts/generate_v2_figures.py
 ```
 
-Optional terminal preview:
+## Experiment Outputs
 
-```bash
-python scripts/report_v2_tables.py
-```
+Main output directories:
+- `data/outputs_v2/controlled/`
+- `data/outputs_v2/controlled_sweep/`
+- `data/outputs_v2/controlled_summary/`
+- `data/outputs_v2/realistic/`
+- `data/table/v2/`
 
-## Outputs
+Key table artifacts (CSV/JSON) are written under `data/table/v2/`, including:
+- `paper_table_controlled.csv`
+- `paper_table_realistic_task.csv`
+- `paper_table_realistic_protocol.csv`
 
-Raw JSON records are written to:
+## Anonymous Release Checklist
 
-- `data/outputs_v2/controlled/group2/` ... `data/outputs_v2/controlled/group4/`
-- `data/outputs_v2/controlled_sweep/group2/` ... `data/outputs_v2/controlled_sweep/group4/`
-- `data/outputs_v2/controlled_summary/group2/` ... `data/outputs_v2/controlled_summary/group4/`
-- `data/outputs_v2/realistic/group1/` ... `data/outputs_v2/realistic/group7/`
+Before uploading to an anonymous review platform:
 
-Stego run records now include:
+1. Secrets
+- Keep all keys in environment variables only.
+- Ensure `.env` contains placeholders or is excluded from upload.
 
-- `secret_bits_budget`
-- `consumed_bits`
+2. Paths
+- Avoid machine-specific absolute paths.
+- For local model checkpoints, set environment overrides such as:
+  - `MODEL_PATH_QWEN2_5_7B_INSTRUCT`
+  - `MODEL_PATH_DEEPSEEK_R1_DISTILL_QWEN_7B`
+  - `MODEL_PATH_META_LLAMA_3_1_8B_INSTRUCT`
 
-Aggregated artifacts are written to:
+3. Identity metadata
+- `LICENSE` uses `Anonymous Authors`.
+- Do not upload `.git/` to anonymous submission systems.
+- Confirm there is no author/email metadata in public config files.
 
-- `data/table/v2/controlled_summary.json`
-- `data/table/v2/controlled_summary_summary.json`
-- `data/table/v2/realistic_summary.json`
-- `data/table/v2/paper_table_controlled.csv`
-- `data/table/v2/paper_table_realistic_task.csv`
-- `data/table/v2/paper_table_realistic_protocol.csv`
-- `data/table/v2/plot_ber_vs_condition.json`
-- `data/table/v2/plot_controlled_summary_asymmetry.json`
-- `data/table/v2/plot_controlled_drift_severity_sweep.json`
-- `data/table/v2/plot_task_correctness_vs_reliability.json`
-- `data/table/v2/figures/figure1_controlled_asymmetry_ber.pdf`
-- `data/table/v2/figures/figure2_task_vs_communication.pdf`
-- `data/table/v2/figures/figure3_ber_vs_drift_severity.pdf`
-- `data/table/v2/figures/figure4_token_length_capacity.pdf`
-- `data/table/v2/figures/appendix_figure_c_summary_asymmetry_ber.pdf`
-
-`paper_table_realistic_task.csv` is judge-first:
-
-- `LLMJudgeCorrect`
-- `LLMJudgeScore`
-- `F1`
-- `EM`
-
-All table cells are reported as `mean ± std`.
+4. Documentation style
+- Keep README in English as the default public-facing document.
+- Make reproduction steps copy-paste ready.
