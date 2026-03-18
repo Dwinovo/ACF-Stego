@@ -508,7 +508,8 @@ def write_realistic_semantic_vs_reliability_pdf(
 
     fig.tight_layout(pad=0.2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
+    # Use a slightly larger padding to keep extra whitespace above the legend.
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.5)
     plt.close(fig)
     return True
 
@@ -533,9 +534,9 @@ def write_realistic_dual_axis_tradeoff_pdf(
 ) -> bool:
     try:
         import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
         from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
+        from matplotlib.transforms import Bbox
     except Exception as exc:
         print(f"[figure] skip grouped-bar tradeoff (matplotlib unavailable): {exc}")
         return False
@@ -672,17 +673,35 @@ def write_realistic_dual_axis_tradeoff_pdf(
     for tick in ax_right.get_yticklabels():
         tick.set_fontweight("bold")
     ax_left.grid(False)
+    frame_color = "#000000"
+    side_lw = 0.8
+    horizontal_lw = 1.3
+    frame_zorder = 50
 
-    ax_left.spines["bottom"].set_visible(True)
-    ax_left.spines["bottom"].set_linewidth(0.8)
-    ax_left.spines["bottom"].set_color("#111111")
-    ax_left.spines["left"].set_visible(False)
-    ax_left.spines["right"].set_visible(False)
-    ax_left.spines["top"].set_visible(False)
-    ax_right.spines["top"].set_visible(False)
-    ax_right.spines["left"].set_visible(False)
-    ax_right.spines["right"].set_visible(False)
-    ax_right.spines["bottom"].set_visible(False)
+    # Hide all default spines, then draw the frame on the top axis so it
+    # always stays above bars from both y-axes.
+    for spine_name in ("bottom", "top", "left", "right"):
+        ax_left.spines[spine_name].set_visible(False)
+        ax_right.spines[spine_name].set_visible(False)
+
+    ax_right.hlines(
+        [0.0, 1.0],
+        x_min,
+        x_max,
+        colors=frame_color,
+        linewidth=horizontal_lw,
+        zorder=frame_zorder,
+        clip_on=False,
+    )
+    ax_right.vlines(
+        [x_min, x_max],
+        ymin=0.0,
+        ymax=1.0,
+        colors=frame_color,
+        linewidth=side_lw,
+        zorder=frame_zorder,
+        clip_on=False,
+    )
 
     legend_handles = [
         Patch(facecolor=reliability_color, edgecolor="none", label="Channel Reliability (1−BER)"),
@@ -709,7 +728,21 @@ def write_realistic_dual_axis_tradeoff_pdf(
 
     fig.tight_layout(pad=0.2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
+    # Extend only the top side of the tight bbox to add headroom above the legend.
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        tight_bbox = fig.get_tightbbox(renderer).padded(0.02)
+        extra_top_inches = 0.1
+        extended_bbox = Bbox.from_extents(
+            tight_bbox.x0,
+            tight_bbox.y0,
+            tight_bbox.x1,
+            tight_bbox.y1 + extra_top_inches,
+        )
+        fig.savefig(output_path, bbox_inches=extended_bbox)
+    except Exception:
+        fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     return True
 
