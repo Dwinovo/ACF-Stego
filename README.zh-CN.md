@@ -29,7 +29,7 @@ ACF-Stego/
 ├── scripts/
 │   ├── run_v2_pipeline.sh           # 一键实验流水线
 │   ├── score_v2_llm_judge.py        # realistic 语义 LLM 评测
-│   └── analyze_v2_outputs.py        # 生成论文两张表 + 一张图
+│   └── analyze_v2_outputs.py        # 生成两张表 + 两张图
 ├── tests/                           # 单元测试
 ├── .env.example                     # 环境变量模板
 ├── requirements.txt                 # Python 依赖
@@ -79,7 +79,7 @@ bash scripts/run_v2_pipeline.sh --stage recommended
 - controlled 套件（`v2_controlled_asymmetry`）
 - realistic 套件（`group1` ... `group8`）
 - realistic 语义 LLM 评测
-- 聚合并生成论文表图
+- 聚合并生成图和表
 
 常用替代命令：
 
@@ -126,9 +126,10 @@ python scripts/analyze_v2_outputs.py --experiment all
 - `data/outputs_v2/realistic/`
 - `data/table/v2/`
 
-论文主表（`data/table/v2/`）：
+表（`data/table/v2/`）：
 - `paper_table_controlled_cognitive_asymmetry.csv`
 - `paper_table_realistic_integrated.csv`
 
-论文主图（`data/table/v2/figures/`）：
+图（`data/table/v2/figures/`）：
 - `figure_ber_vs_decoder_sessions.pdf`
+- `figure_tradeoff_grouped_bar.pdf`

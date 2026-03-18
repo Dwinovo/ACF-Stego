@@ -29,7 +29,7 @@ ACF-Stego/
 ├── scripts/
 │   ├── run_v2_pipeline.sh           # One-command experiment pipeline
 │   ├── score_v2_llm_judge.py        # Semantic LLM judge for realistic outputs
-│   └── analyze_v2_outputs.py        # Generate the two paper tables + one paper figure
+│   └── analyze_v2_outputs.py        # Generate two tables + two figures
 ├── tests/                           # Unit tests for analysis/metrics tools
 ├── .env.example                     # Environment variable template (safe placeholders)
 ├── requirements.txt                 # Python dependencies
@@ -79,7 +79,7 @@ This executes:
 - controlled suite (`v2_controlled_asymmetry`)
 - realistic suite (`group1` ... `group8`)
 - semantic LLM judging for realistic outputs
-- aggregation for paper tables and figures
+- aggregation for tables and figures
 
 Useful alternatives:
 
@@ -126,9 +126,10 @@ Main output directories:
 - `data/outputs_v2/realistic/`
 - `data/table/v2/`
 
-Primary paper tables (`data/table/v2/`):
+Tables (`data/table/v2/`):
 - `paper_table_controlled_cognitive_asymmetry.csv`
 - `paper_table_realistic_integrated.csv`
 
-Primary paper figures (`data/table/v2/figures/`):
+Figures (`data/table/v2/figures/`):
 - `figure_ber_vs_decoder_sessions.pdf`
+- `figure_tradeoff_grouped_bar.pdf`

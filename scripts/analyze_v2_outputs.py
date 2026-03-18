@@ -804,7 +804,7 @@ def main() -> None:
     else:
         print("Skipped BER-vs-decoder-sessions figure (insufficient controlled_sweep data).")
 
-    # Keep only the single paper figure from this script.
+    # Keep only the two paper figures from this script.
     scatter_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_semantic_vs_reliability{name_suffix}.pdf"
     if scatter_path.exists():
         scatter_path.unlink()
@@ -814,8 +814,13 @@ def main() -> None:
         legacy_dual_axis_path.unlink()
 
     grouped_bar_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_tradeoff_grouped_bar{name_suffix}.pdf"
-    if grouped_bar_path.exists():
-        grouped_bar_path.unlink()
+    if write_realistic_dual_axis_tradeoff_pdf(
+        realistic_table_csv=realistic_csv_path,
+        output_path=grouped_bar_path,
+    ):
+        print(f"Wrote grouped-bar tradeoff figure to: {grouped_bar_path}")
+    else:
+        print("Skipped grouped-bar tradeoff figure (insufficient realistic data).")
 
     print(f"Wrote final CSV tables to: {output_dir}")
 
