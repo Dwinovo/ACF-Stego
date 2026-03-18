@@ -33,6 +33,50 @@ EMBEDDING_CAPACITY_SCALE_PER_1K_TOKENS = 1000.0
 DRIFT_RECENT_PATTERN = re.compile(r"^drift_recent(\d+)$")
 
 
+def _patch_stegokit_meteor_decode_index_error() -> None:
+    try:
+        from stegokit.algo.meteor.meteor import MeteorStrategy
+    except Exception:
+        return
+
+    patch_marker = "_spl2026_meteor_decode_index_guard"
+    if bool(getattr(MeteorStrategy, patch_marker, False)):
+        return
+
+    original_decode_token_step = MeteorStrategy._decode_token_step
+
+    def patched_decode_token_step(
+        self: Any,
+        *,
+        prob_table: list[float],
+        indices: list[int],
+        prev_token_id: int,
+        precision: int,
+        prg: Any | None,
+        cur_interval: list[int] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        try:
+            return original_decode_token_step(
+                self,
+                prob_table=prob_table,
+                indices=indices,
+                prev_token_id=prev_token_id,
+                precision=precision,
+                prg=prg,
+                cur_interval=cur_interval,
+                extra=extra,
+            )
+        except IndexError as exc:
+            if "out of bounds" not in str(exc).lower():
+                raise
+            return {"bits": "", "bits_len": 0, "decode_error": f"{exc.__class__.__name__}: {exc}"}
+
+    MeteorStrategy._decode_token_step = patched_decode_token_step
+    setattr(MeteorStrategy, patch_marker, True)
+    print("[patch] applied stegokit meteor decode index guard")
+
+
 @dataclass(frozen=True)
 class GroupSpec:
     output_group: str
@@ -106,6 +150,11 @@ GROUP_SPECS: dict[str, GroupSpec] = {
         algorithm=stegokit.StegoAlgorithm.METEOR,
         use_retrieval=True,
     ),
+    "group8": GroupSpec(
+        output_group="G8",
+        algorithm=None,
+        use_retrieval=True,
+    ),
 }
 
 EXPERIMENT_SPECS: dict[str, ExperimentSpec] = {
@@ -114,7 +163,7 @@ EXPERIMENT_SPECS: dict[str, ExperimentSpec] = {
         record_name="realistic_cognitive_asymmetry",
         output_dir=config.OUTPUT_V2_REALISTIC_DIR,
         sample_size=config.LONGMEMEVAL_REALISTIC_SAMPLE_SIZE,
-        groups=("group1", "group2", "group3", "group4", "group5", "group6", "group7"),
+        groups=("group1", "group2", "group3", "group4", "group5", "group6", "group7", "group8"),
         conditions=("no_drift",),
     ),
     "controlled": ExperimentSpec(
@@ -726,10 +775,20 @@ def build_decode_messages_for_condition(
     return build_base_messages(trimmed_sessions, question)
 
 
-def _group_acf_k_values(spec: GroupSpec, runtime: RuntimeContext) -> tuple[int | None, ...]:
+def _group_acf_k_values(
+    experiment: ExperimentSpec,
+    spec: GroupSpec,
+    runtime: RuntimeContext,
+) -> tuple[int | None, ...]:
     if not spec.asymmetric:
         return (None,)
     values = tuple(int(value) for value in runtime.acf_k_values if int(value) > 0)
+    if experiment.key == "controlled_sweep" and spec.output_group == "G4":
+        if 16 in values:
+            return (16,)
+        if values:
+            return (max(values),)
+        return (16,)
     if values:
         return values
     return (STEGO_SECURE_PARAMETER,)
@@ -1126,8 +1185,20 @@ def _run_stego_group(
             max_bits=consumed_bits,
             extra=build_stego_extra(spec, trial_seed, acf_k=acf_k),
         )
-        decode_result = stego_dispatcher.dispatch_decode(decode_context)
-        recovered_bits = str(decode_result.bits or "")[:consumed_bits]
+        decode_time_seconds = 0.0
+        recovered_bits = ""
+        decode_error = ""
+        try:
+            decode_result = stego_dispatcher.dispatch_decode(decode_context)
+            recovered_bits = str(decode_result.bits or "")[:consumed_bits]
+            decode_time_seconds = float(getattr(decode_result, "decode_time_seconds", 0.0) or 0.0)
+        except Exception as exc:
+            decode_error = f"{exc.__class__.__name__}: {exc}"
+            k_suffix = f" k={acf_k}" if acf_k is not None else ""
+            print(
+                f"[decode] error group={group_dir_name} condition={condition} "
+                f"question_id={question_id} seed={trial_seed}{k_suffix} -> {decode_error}"
+            )
         compared_bits_len, bit_errors, ber = compute_bit_metrics(embedded_bits, recovered_bits)
         decode_success = int(recovered_bits == embedded_bits)
         run_record = {
@@ -1149,7 +1220,7 @@ def _run_stego_group(
             "average_entropy": average_entropy,
             "embedding_capacity": embedding_capacity,
             "encode_time_seconds": encode_time_seconds,
-            "decode_time_seconds": float(getattr(decode_result, "decode_time_seconds", 0.0) or 0.0),
+            "decode_time_seconds": decode_time_seconds,
             "embedded_bits": embedded_bits,
             "recovered_bits": recovered_bits,
             "compared_bits_len": compared_bits_len,
@@ -1162,6 +1233,8 @@ def _run_stego_group(
             "decode_trimmed_history_message_count": decode_budget.trimmed_history_message_count,
             **prediction_metrics,
         }
+        if decode_error:
+            run_record["decode_error"] = decode_error
         write_json_record(output_path, run_record)
 
 
@@ -1176,7 +1249,7 @@ def _run_single_group(
     spec = GROUP_SPECS[group_name]
     output_root = PROJECT_ROOT / experiment.output_dir
     prepare_group_output_dir(output_root, group_name)
-    group_k_values = _group_acf_k_values(spec, runtime)
+    group_k_values = _group_acf_k_values(experiment, spec, runtime)
 
     for record_idx, record in enumerate(records, start=1):
         question_id = str(record.get("question_id", f"sample_{record_idx}")).strip()
@@ -1347,6 +1420,8 @@ def _run_single_group(
 def run_v2_experiment(experiment_key: str, group_names: list[str] | None = None) -> None:
     if experiment_key not in EXPERIMENT_SPECS:
         raise ValueError(f"Unsupported experiment: {experiment_key}")
+
+    _patch_stegokit_meteor_decode_index_error()
 
     experiment = EXPERIMENT_SPECS[experiment_key]
     groups = _resolve_groups(experiment, group_names)

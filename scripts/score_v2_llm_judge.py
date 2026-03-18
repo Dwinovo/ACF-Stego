@@ -25,7 +25,7 @@ EXPERIMENT_OUTPUTS = {
 }
 
 ALLOWED_GROUPS = {
-    "realistic": {"G1", "G2", "G3", "G4", "G5", "G6", "G7"},
+    "realistic": {"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"},
     "controlled": {"G2", "G3", "G4"},
 }
 
@@ -76,7 +76,7 @@ TIMEOUT_RETRY_SLEEP_SECONDS = 1.0
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Score V2 experiment outputs with a remote LLM judge.")
     parser.add_argument("--experiment", choices=("realistic", "controlled", "all"), default="realistic")
-    parser.add_argument("--only-group", choices=[f"group{i}" for i in range(1, 8)], default=None)
+    parser.add_argument("--only-group", choices=[f"group{i}" for i in range(1, 9)], default=None)
     parser.add_argument("--condition", choices=("no_drift", "drift_recent3"), default=None)
     parser.add_argument("--limit", type=int, default=None, help="Maximum number of records to score.")
     parser.add_argument(

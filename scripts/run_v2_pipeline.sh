@@ -10,8 +10,6 @@ RUN_CONTROLLED=1
 RUN_REALISTIC=1
 RUN_JUDGE=1
 RUN_ANALYZE=1
-RUN_FIGURES=0
-RUN_REPORT=0
 ANALYSIS_SUFFIX=""
 JUDGE_LIMIT=""
 JUDGE_SKIP_EXISTING=0
@@ -24,7 +22,7 @@ Usage:
 
 Default pipeline:
   1. controlled suite (drift -> summary -> sweep)
-  2. realistic group1-group7
+  2. realistic group1-group8
   3. realistic LLM judge
   4. aggregate analysis and export two final CSV tables
 
@@ -34,10 +32,6 @@ Options:
   --skip-realistic
   --skip-judge
   --skip-analyze
-  --with-figures
-  --with-report
-  --skip-figures
-  --skip-report
   --analysis-suffix <name>
   --judge-limit <n>
   --judge-skip-existing
@@ -48,7 +42,7 @@ Options:
 Examples:
   bash scripts/run_v2_pipeline.sh --stage debug --judge-limit 20 --analysis-suffix debug
   bash scripts/run_v2_pipeline.sh --stage recommended
-  bash scripts/run_v2_pipeline.sh --skip-judge --skip-report
+  bash scripts/run_v2_pipeline.sh --skip-judge
 EOF
 }
 
@@ -73,22 +67,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-analyze)
       RUN_ANALYZE=0
-      shift
-      ;;
-    --with-figures)
-      RUN_FIGURES=1
-      shift
-      ;;
-    --with-report)
-      RUN_REPORT=1
-      shift
-      ;;
-    --skip-figures)
-      RUN_FIGURES=0
-      shift
-      ;;
-    --skip-report)
-      RUN_REPORT=0
       shift
       ;;
     --analysis-suffix)
@@ -174,7 +152,7 @@ if [[ "${RUN_CONTROLLED}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_REALISTIC}" -eq 1 ]]; then
-  for group_id in 1 2 3 4 5 6 7; do
+  for group_id in 1 2 3 4 5 6 7 8; do
     run_cmd python -m "experiments.v2_group${group_id}"
   done
 fi
@@ -196,22 +174,6 @@ if [[ "${RUN_ANALYZE}" -eq 1 ]]; then
     analyze_cmd+=(--output-suffix "${ANALYSIS_SUFFIX}")
   fi
   run_cmd "${analyze_cmd[@]}"
-fi
-
-if [[ "${RUN_FIGURES}" -eq 1 ]]; then
-  figure_cmd=(python scripts/generate_v2_figures.py)
-  if [[ -n "${ANALYSIS_SUFFIX}" ]]; then
-    figure_cmd+=(--suffix "${ANALYSIS_SUFFIX}")
-  fi
-  run_cmd "${figure_cmd[@]}"
-fi
-
-if [[ "${RUN_REPORT}" -eq 1 ]]; then
-  report_cmd=(python scripts/report_v2_tables.py)
-  if [[ -n "${ANALYSIS_SUFFIX}" ]]; then
-    report_cmd+=(--suffix "${ANALYSIS_SUFFIX}")
-  fi
-  run_cmd "${report_cmd[@]}"
 fi
 
 echo

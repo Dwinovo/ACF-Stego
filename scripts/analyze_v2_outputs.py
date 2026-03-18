@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import re
+import statistics
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +26,7 @@ ALLOWED_GROUPS = {
     "controlled": {"G2", "G3", "G4"},
     "controlled_summary": {"G2", "G3", "G4"},
     "controlled_sweep": {"G2", "G3", "G4"},
-    "realistic": {"G1", "G2", "G3", "G4", "G5", "G6", "G7"},
+    "realistic": {"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"},
 }
 
 ALLOWED_CONDITIONS = {
@@ -41,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         choices=("all", "realistic", "controlled", "controlled_sweep", "controlled_summary"),
         default="all",
     )
-    parser.add_argument("--only-group", choices=[f"group{i}" for i in range(1, 8)], default=None)
+    parser.add_argument("--only-group", choices=[f"group{i}" for i in range(1, 9)], default=None)
     parser.add_argument("--output-suffix", default="", help="Optional suffix to avoid overwriting full summaries.")
     return parser.parse_args()
 
@@ -99,12 +103,615 @@ def remove_obsolete_artifacts(output_dir: Path, name_suffix: str) -> None:
         f"plot_controlled_summary_asymmetry{name_suffix}.json",
         f"plot_controlled_drift_severity_sweep{name_suffix}.json",
         f"plot_task_correctness_vs_reliability{name_suffix}.json",
+        f"controlled_summary{name_suffix}.json",
+        f"controlled_summary_summary{name_suffix}.json",
+        f"controlled_sweep_summary{name_suffix}.json",
+        f"realistic_summary{name_suffix}.json",
+        f"all_raw_records{name_suffix}.json",
     ]
     for name in obsolete_names:
         path = output_dir / name
         if path.exists():
             path.unlink()
 
+def write_controlled_drift_ber_pdf(
+    summaries: list[dict],
+    *,
+    output_path: Path,
+) -> bool:
+    points = analysis_tools.build_controlled_drift_severity_sweep_plot(summaries)
+    if not points:
+        return False
+
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import FuncFormatter
+    except Exception as exc:
+        print(f"[figure] skip ber-vs-decoder-sessions: {exc}")
+        return False
+
+    # (group, label, color, marker, linestyle, acf_k_filter, line_width, marker_size, band_alpha, zorder)
+    protocol_specs = (
+        ("G2", "DISCOP", "#d62728", "o", (0, (3, 1.5)), None, 1.9, 6.8, 0.16, 4),  # red dashed
+        ("G3", "METEOR", "#1f77b4", "o", (0, (3, 1.5)), None, 1.9, 6.8, 0.16, 4),  # blue dashed
+        ("G4", "ACF (k=16)", "#2ca02c", "o", "-", 16, 1.9, 6.8, 0.12, 6),  # green
+    )
+
+    decoder_sessions = sorted({
+        int(point.get("decoder_sessions_kept", 0) or 0)
+        for point in points if int(point.get("decoder_sessions_kept", 0) or 0) > 0
+    })
+    if not decoder_sessions:
+        return False
+        
+    window_sessions = int(config.LONGMEMEVAL_WINDOW_SESSIONS)
+    truncation_ticks = list(range(0, max(1, window_sessions)))
+
+    # Use Times New Roman as the global figure font.
+    plt.rcParams["font.family"] = "serif"
+    plt.rcParams["font.serif"] = ["Times New Roman", "Times", "DejaVu Serif"]
+
+    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    all_y_upper: list[float] = []
+
+    for (
+        group,
+        label,
+        color,
+        marker,
+        linestyle,
+        acf_k_filter,
+        line_width,
+        marker_size,
+        band_alpha,
+        zorder,
+    ) in protocol_specs:
+        group_points = [
+            p
+            for p in points
+            if str(p.get("group", "")).strip() == group
+            and (
+                acf_k_filter is None
+                or int(p.get("acf_k", 0) or 0) == int(acf_k_filter)
+            )
+        ]
+        if not group_points:
+            continue
+
+        ber_by_truncation = defaultdict(list)
+        ber_std_by_truncation = defaultdict(list)
+        for row in group_points:
+            session_kept = int(row.get("decoder_sessions_kept", 0) or 0)
+            ber_value = max(0.0, float(row.get("ber", 0.0) or 0.0) * 100.0)
+            ber_std = max(0.0, float(row.get("ber_std", 0.0) or 0.0) * 100.0)
+            if session_kept > 0:
+                truncation = max(0, window_sessions - session_kept)
+                ber_by_truncation[truncation].append(ber_value)
+                ber_std_by_truncation[truncation].append(ber_std)
+
+        x_values = sorted(ber_by_truncation.keys())
+        if not x_values:
+            continue
+
+        y_values = [statistics.mean(ber_by_truncation[x]) for x in x_values]
+        y_stds = [
+            statistics.mean(ber_std_by_truncation[x]) if ber_std_by_truncation[x] else 0.0
+            for x in x_values
+        ]
+        y_lower = [max(0.0, y - s) for y, s in zip(y_values, y_stds)]
+        y_upper = [min(100.0, y + s) for y, s in zip(y_values, y_stds)]
+        x_plot = [float(x) for x in x_values]
+        y_plot = [float(y) for y in y_values]
+        y_lower_plot = [float(y) for y in y_lower]
+        y_upper_plot = [float(y) for y in y_upper]
+        all_y_upper.extend(y_upper)
+
+        ax.fill_between(
+            x_plot,
+            y_lower_plot,
+            y_upper_plot,
+            color=color,
+            alpha=band_alpha,
+            linewidth=0.0,
+            zorder=zorder - 1,
+        )
+
+        ax.plot(
+            x_plot, y_plot,
+            marker=marker, linestyle=linestyle,
+            linewidth=line_width, markersize=marker_size,
+            color=color, label=label,
+            zorder=zorder,
+            markeredgewidth=0.6, markeredgecolor="white"
+        )
+
+    ax.set_xlabel(r"Context Truncation ($\Delta$ Sessions)", fontsize=10.5, fontweight="bold")
+    ax.set_ylabel("BER (%)", fontsize=10.5, fontweight="bold")
+
+    ax.set_xticks(truncation_ticks)
+    ax.set_xlim(-0.15, max(truncation_ticks) + 0.20)
+
+    y_max = max(all_y_upper) if all_y_upper else 0.0
+    y_limit = max(10.0, float(int((y_max + 9.999) // 10) * 10))
+    if y_limit < y_max:
+        y_limit += 10.0
+    y_limit = min(100.0, y_limit)
+    # Leave a tiny negative margin so the BER=0 line is slightly above the plot bottom.
+    y_lower_margin = 2.0
+    ax.set_ylim(-y_lower_margin, y_limit)
+    ax.set_yticks(list(range(0, int(y_limit) + 1, 10)))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value)}%"))
+
+    ax.grid(True, axis="y", linestyle="-", linewidth=0.58, color="#ababab", alpha=0.72)
+    ax.grid(True, axis="x", linestyle="--", linewidth=0.46, color="#cdcdcd", alpha=0.58)
+
+    ax.spines["left"].set_visible(True)
+    ax.spines["left"].set_linewidth(0.8)
+    ax.spines["left"].set_color("#111111")
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["bottom"].set_linewidth(0.8)
+    ax.spines["bottom"].set_color("#111111")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax.tick_params(colors="#000000", labelsize=10.0)
+    for tick in ax.get_xticklabels():
+        tick.set_fontweight("bold")
+    for tick in ax.get_yticklabels():
+        tick.set_fontweight("bold")
+
+    ax.xaxis.label.set_color("#000000")
+    ax.yaxis.label.set_color("#000000")
+
+    legend = ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(0.02, 0.98),
+        frameon=True,
+        facecolor="white",
+        edgecolor="#b6b6b6",
+        prop={"family": "serif", "size": 8.0, "weight": "bold"},
+        handlelength=3.6,
+    )
+    legend.get_frame().set_linewidth(0.5)
+
+    ax.margins(x=0.02, y=0.02)
+    fig.tight_layout(pad=0.2)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return True
+
+
+def write_realistic_semantic_vs_reliability_pdf(
+    summaries: list[dict],
+    *,
+    output_path: Path,
+    realistic_table_csv: Path | None = None,
+) -> bool:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except Exception as exc:
+        print(f"[figure] skip semantic-vs-reliability scatter (matplotlib unavailable): {exc}")
+        return False
+
+    realistic_rows = [
+        row
+        for row in summaries
+        if str(row.get("experiment", "")).strip() == "realistic_cognitive_asymmetry"
+        and str(row.get("condition", "")).strip() == "no_drift"
+    ]
+    if not realistic_rows:
+        return False
+
+    def _extract_first_number(text: str) -> float | None:
+        raw = str(text or "").strip()
+        if not raw or raw == "---":
+            return None
+        match = re.search(r"[-+]?\d*\.?\d+", raw)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+
+    def _limits_from_csv(path: Path | None) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+        if path is None or not path.exists():
+            return None, None
+
+        x_vals: list[float] = []
+        y_vals: list[float] = []
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    score = _extract_first_number(str(row.get("Score", "")))
+                    if score is not None:
+                        x_vals.append(score)
+                    ber_percent = _extract_first_number(str(row.get("BER", "")))
+                    if ber_percent is not None:
+                        y_vals.append(1.0 - (ber_percent / 100.0))
+        except Exception:
+            return None, None
+
+        def _make_limits(
+            values: list[float],
+            *,
+            min_span: float,
+            pad_ratio: float,
+            lower: float | None = None,
+            upper: float | None = None,
+        ) -> tuple[float, float] | None:
+            if not values:
+                return None
+            v_min = min(values)
+            v_max = max(values)
+            span = max(v_max - v_min, min_span)
+            center = (v_min + v_max) / 2.0
+            pad = span * pad_ratio
+            lo = center - span / 2.0 - pad
+            hi = center + span / 2.0 + pad
+            if lower is not None:
+                lo = max(lower, lo)
+            if upper is not None:
+                hi = min(upper, hi)
+            if hi <= lo:
+                hi = lo + min_span
+            return lo, hi
+
+        x_lim = _make_limits(x_vals, min_span=0.25, pad_ratio=0.14)
+        y_lim = _make_limits(y_vals, min_span=0.18, pad_ratio=0.16, lower=0.0, upper=1.02)
+        return x_lim, y_lim
+
+    def _match(group: str, acf_k: int | None = None) -> dict | None:
+        for row in realistic_rows:
+            if str(row.get("group", "")).strip() != group:
+                continue
+            row_k = analysis_tools.normalize_acf_k(row.get("acf_k"))
+            if row_k == analysis_tools.normalize_acf_k(acf_k):
+                return row
+        return None
+
+    # Baseline vertical lines
+    normal_row = _match("G1", None)
+    normal_ret_row = _match("G8", None)
+    x_normal = analysis_tools.safe_float((normal_row or {}).get("llm_judge_score_mean"))
+    x_normal_ret = analysis_tools.safe_float((normal_ret_row or {}).get("llm_judge_score_mean"))
+
+    # (label, row, family, has_ret)
+    points_spec: list[tuple[str, dict | None, str, bool]] = [
+        ("DISCOP", _match("G2", None), "discop", False),
+        ("METEOR", _match("G3", None), "meteor", False),
+        ("ACF", _match("G4", 8), "acf", False),
+        ("ACF", _match("G4", 12), "acf", False),
+        ("ACF", _match("G4", 16), "acf", False),
+        ("DISCOP+RET", _match("G6", None), "discop", True),
+        ("METEOR+RET", _match("G7", None), "meteor", True),
+        ("ACF+RET", _match("G5", 8), "acf", True),
+        ("ACF+RET", _match("G5", 12), "acf", True),
+        ("ACF+RET", _match("G5", 16), "acf", True),
+    ]
+
+    family_color = {
+        "discop": "#4783b5",
+        "meteor": "#778899",
+        "acf": "#f47e52",
+    }
+    family_marker = {
+        "discop": "o",
+        "meteor": "s",
+        "acf": "^",
+    }
+
+    plt.rcParams["font.family"] = "serif"
+    plt.rcParams["font.serif"] = ["Times New Roman", "Times", "DejaVu Serif"]
+
+    fig, ax = plt.subplots(figsize=(6.0, 4.6))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    valid_points = 0
+    xs: list[float] = []
+    ys: list[float] = []
+    for _, row, family, has_ret in points_spec:
+        score = analysis_tools.safe_float((row or {}).get("llm_judge_score_mean"))
+        ber = analysis_tools.safe_float((row or {}).get("ber_mean"))
+        if score is None or ber is None:
+            continue
+        x = score
+        y = 1.0 - ber
+        valid_points += 1
+        xs.append(x)
+        ys.append(y)
+        color = family_color[family]
+        marker = family_marker[family]
+        facecolor = "none" if has_ret else color
+        ax.scatter(
+            [x],
+            [y],
+            marker=marker,
+            s=72,
+            edgecolors=color,
+            facecolors=facecolor,
+            linewidths=1.5,
+            zorder=4,
+        )
+    if valid_points == 0:
+        plt.close(fig)
+        return False
+
+    # Reference lines: Normal and Normal+RET
+    if x_normal is not None:
+        ax.axvline(x_normal, color="#8d8d8d", linestyle="--", linewidth=1.3, zorder=2)
+    if x_normal_ret is not None:
+        ax.axvline(x_normal_ret, color="#111111", linestyle="-.", linewidth=1.3, zorder=2)
+
+    csv_xlim, csv_ylim = _limits_from_csv(realistic_table_csv)
+    if csv_xlim is not None:
+        ax.set_xlim(csv_xlim[0], csv_xlim[1])
+    else:
+        x_min = min(xs + [x_normal] if x_normal is not None else xs)
+        x_max = max(xs + [x_normal] if x_normal is not None else xs)
+        if x_normal_ret is not None:
+            x_min = min(x_min, x_normal_ret)
+            x_max = max(x_max, x_normal_ret)
+        x_pad = max(0.05, (x_max - x_min) * 0.12)
+        ax.set_xlim(x_min - x_pad, x_max + x_pad)
+
+    if csv_ylim is not None:
+        ax.set_ylim(csv_ylim[0], csv_ylim[1])
+    else:
+        y_min = min(ys)
+        y_max = max(ys)
+        y_pad = max(0.03, (y_max - y_min) * 0.15)
+        ax.set_ylim(max(0.0, y_min - y_pad), min(1.02, y_max + y_pad))
+
+    ax.set_xlabel("Semantic Utility (Score)", fontsize=11, color="#000000")
+    ax.set_ylabel("Communication Reliability (1 - BER)", fontsize=11, color="#000000")
+    ax.tick_params(colors="#000000", labelsize=9.5)
+    ax.grid(True, linestyle=":", linewidth=0.75, color="#d0d0d0", alpha=0.8)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+        spine.set_color("#111111")
+
+    legend_handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#4783b5", markeredgecolor="#4783b5", markersize=7, label="DISCOP"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor="#778899", markeredgecolor="#778899", markersize=7, label="METEOR"),
+        Line2D([0], [0], marker="^", color="none", markerfacecolor="#f47e52", markeredgecolor="#f47e52", markersize=7, label="ASYMMETRIC"),
+        Line2D([0], [0], marker="o", color="#333333", markerfacecolor="#333333", markeredgecolor="#333333", linestyle="none", markersize=7, label="No RET (filled)"),
+        Line2D([0], [0], marker="o", color="#333333", markerfacecolor="none", markeredgecolor="#333333", linestyle="none", markersize=7, label="+RET (hollow)"),
+    ]
+    if x_normal is not None:
+        legend_handles.append(
+            Line2D([0], [0], color="#8d8d8d", linestyle="--", linewidth=1.3, label="Normal (No Stego)")
+        )
+    if x_normal_ret is not None:
+        legend_handles.append(
+            Line2D([0], [0], color="#111111", linestyle="-.", linewidth=1.3, label="Normal+RET")
+        )
+    ax.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=3,
+        frameon=False,
+        fontsize=8.5,
+        columnspacing=1.2,
+        handletextpad=0.5,
+    )
+
+    fig.tight_layout(pad=0.2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return True
+
+
+def _extract_first_number(text: str) -> float | None:
+    raw = str(text or "").strip()
+    if not raw or raw == "---":
+        return None
+    match = re.search(r"[-+]?\d*\.?\d+", raw)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def write_realistic_dual_axis_tradeoff_pdf(
+    *,
+    realistic_table_csv: Path,
+    output_path: Path,
+) -> bool:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+    except Exception as exc:
+        print(f"[figure] skip grouped-bar tradeoff (matplotlib unavailable): {exc}")
+        return False
+
+    if not realistic_table_csv.exists():
+        return False
+
+    row_by_protocol: dict[str, dict[str, str]] = {}
+    with realistic_table_csv.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            protocol = str(row.get("Protocol", "")).strip()
+            if protocol:
+                row_by_protocol[protocol] = {k: str(v) for k, v in row.items()}
+
+    normal_score = _extract_first_number((row_by_protocol.get("Normal (No Stego)", {}) or {}).get("Score", ""))
+    normal_ret_score = _extract_first_number((row_by_protocol.get("Normal+RET", {}) or {}).get("Score", ""))
+
+    # Plot protocols only; baselines are shown as reference lines.
+    protocol_order: list[str] = [
+        "DISCOP",
+        "DISCOP+RET",
+        "METEOR",
+        "METEOR+RET",
+        "ACF (k=16)",
+        "ACF+RET (k=16)",
+    ]
+
+    rows: list[dict[str, object]] = []
+    for protocol in protocol_order:
+        row = row_by_protocol.get(protocol)
+        if row is None:
+            continue
+        score = _extract_first_number(row.get("Score", ""))
+        ber = _extract_first_number(row.get("BER", ""))
+        if score is None:
+            continue
+        reliability = None if ber is None else max(0.0, min(1.0, 1.0 - (ber / 100.0)))
+        rows.append(
+            {
+                "protocol": protocol,
+                "score": max(0.0, min(1.0, score)),
+                "ber_percent": ber,
+                "reliability": reliability,
+                "is_ret": "+RET" in protocol,
+            }
+        )
+
+    if len(rows) < 3:
+        return False
+
+    plt.rcParams["font.family"] = "serif"
+    plt.rcParams["font.serif"] = ["Times New Roman", "Times", "DejaVu Serif"]
+
+    fig, ax_left = plt.subplots(figsize=(9.8, 4.9))
+    fig.patch.set_facecolor("white")
+    ax_left.set_facecolor("white")
+    ax_right = ax_left.twinx()
+    ax_right.patch.set_alpha(0.0)
+
+    x_positions = list(range(len(rows)))
+    bar_width = 0.34
+    score_color = "#f7b89d"
+    reliability_color = "#aac7e8"
+
+    def _label(protocol: str) -> str:
+        if protocol.startswith("ACF+RET (k="):
+            k_text = protocol.replace("ACF+RET ", "")
+            return f"ACF {k_text}\nRET"
+        if protocol.startswith("ACF (k="):
+            return protocol
+        text = protocol.replace("Normal (No Stego)", "Normal").replace("+RET", "\nRET")
+        if "(k=" in text:
+            text = text.replace(" (", "\n(")
+        return text
+
+    for idx, row in enumerate(rows):
+        score = float(row["score"])
+        reliability = row["reliability"]
+
+        if reliability is not None:
+            ax_left.bar(
+                idx - bar_width / 2.0,
+                float(reliability),
+                width=bar_width,
+                color=reliability_color,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=3,
+            )
+        ax_right.bar(
+            idx + bar_width / 2.0,
+            score,
+            width=bar_width,
+            color=score_color,
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=3,
+        )
+
+    normal_line_color = "#2155A6"
+    normal_ret_line_color = "#A35A1F"
+    if normal_score is not None:
+        ax_right.axhline(normal_score, color=normal_line_color, linestyle="--", linewidth=1.4, zorder=10)
+    if normal_ret_score is not None:
+        ax_right.axhline(normal_ret_score, color=normal_ret_line_color, linestyle="--", linewidth=1.4, zorder=10)
+
+    # Tight horizontal margins: keep only a slim breathing room around outer bars.
+    side_pad = 0.08
+    x_min = -bar_width - side_pad
+    x_max = (len(rows) - 1) + bar_width + side_pad
+    ax_left.set_xlim(x_min, x_max)
+    ax_right.set_xlim(x_min, x_max)
+    ax_left.set_ylim(0.0, 1.08)
+    ax_right.set_ylim(0.0, 1.08)
+    common_ticks = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    ax_left.set_yticks(common_ticks)
+    ax_right.set_yticks(common_ticks)
+
+    ax_left.set_xticks(x_positions)
+    ax_left.set_xticklabels([_label(str(item["protocol"])) for item in rows], fontsize=18.0, rotation=0, ha="center")
+    for tick in ax_left.get_xticklabels():
+        tick.set_multialignment("center")
+        tick.set_fontweight("bold")
+    ax_left.set_xlabel("")
+    ax_left.set_ylabel("Channel Reliability (1−BER)", fontsize=13.5, color="#000000", fontweight="bold")
+    ax_right.set_ylabel("Semantic Utility (Score)", fontsize=13.5, color="#000000", fontweight="bold")
+
+    ax_left.tick_params(axis="x", colors="#000000", labelsize=13.0, width=1.1, length=5.0)
+    ax_left.tick_params(axis="y", colors="#000000", labelsize=14.5, width=1.3, length=6.0)
+    ax_right.tick_params(axis="y", colors="#000000", labelsize=14.5, width=1.3, length=6.0)
+    for tick in ax_left.get_yticklabels():
+        tick.set_fontweight("bold")
+    for tick in ax_right.get_yticklabels():
+        tick.set_fontweight("bold")
+    ax_left.grid(False)
+
+    ax_left.spines["bottom"].set_visible(True)
+    ax_left.spines["bottom"].set_linewidth(0.8)
+    ax_left.spines["bottom"].set_color("#111111")
+    ax_left.spines["left"].set_visible(False)
+    ax_left.spines["right"].set_visible(False)
+    ax_left.spines["top"].set_visible(False)
+    ax_right.spines["top"].set_visible(False)
+    ax_right.spines["left"].set_visible(False)
+    ax_right.spines["right"].set_visible(False)
+    ax_right.spines["bottom"].set_visible(False)
+
+    legend_handles = [
+        Patch(facecolor=reliability_color, edgecolor="none", label="Channel Reliability (1−BER)"),
+        Patch(facecolor=score_color, edgecolor="none", label="Semantic Utility (Score)"),
+    ]
+    if normal_score is not None:
+        legend_handles.append(
+            Line2D([0], [0], color=normal_line_color, linestyle="--", linewidth=1.4, label="Normal Score")
+        )
+    if normal_ret_score is not None:
+        legend_handles.append(
+            Line2D([0], [0], color=normal_ret_line_color, linestyle="--", linewidth=1.4, label="Normal+RET Score")
+        )
+    ax_left.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=2,
+        frameon=False,
+        prop={"family": "serif", "size": 15.5, "weight": "bold"},
+        handletextpad=0.6,
+        columnspacing=1.2,
+    )
+
+    fig.tight_layout(pad=0.2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return True
 
 def main() -> None:
     args = parse_args()
@@ -177,17 +784,38 @@ def main() -> None:
         "Acc",
         "Score",
         "F1",
+        "Entropy(bits/token)",
         "BER",
         "DSR",
         "Nom.(bits/1kTok)",
         "Eff.(bits/1kTok)",
     ]
     realistic_rows = analysis_tools.build_realistic_integrated_table_rows(combined_summaries)
+    realistic_csv_path = output_dir / f"paper_table_realistic_integrated{name_suffix}.csv"
     analysis_tools.write_csv(
-        output_dir / f"paper_table_realistic_integrated{name_suffix}.csv",
+        realistic_csv_path,
         realistic_headers,
         realistic_rows,
     )
+
+    figure_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_ber_vs_decoder_sessions{name_suffix}.pdf"
+    if write_controlled_drift_ber_pdf(combined_summaries, output_path=figure_path):
+        print(f"Wrote BER-vs-decoder-sessions figure to: {figure_path}")
+    else:
+        print("Skipped BER-vs-decoder-sessions figure (insufficient controlled_sweep data).")
+
+    # Keep only the single paper figure from this script.
+    scatter_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_semantic_vs_reliability{name_suffix}.pdf"
+    if scatter_path.exists():
+        scatter_path.unlink()
+
+    legacy_dual_axis_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_tradeoff_dual_axis{name_suffix}.pdf"
+    if legacy_dual_axis_path.exists():
+        legacy_dual_axis_path.unlink()
+
+    grouped_bar_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_tradeoff_grouped_bar{name_suffix}.pdf"
+    if grouped_bar_path.exists():
+        grouped_bar_path.unlink()
 
     print(f"Wrote final CSV tables to: {output_dir}")
 

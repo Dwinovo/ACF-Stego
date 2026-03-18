@@ -322,7 +322,20 @@ class AnalysisToolsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            rows[9],
+            rows[1],
+            [
+                "Normal+RET",
+                "---",
+                "---",
+                "---",
+                "---",
+                "---",
+                "---",
+                "---",
+            ],
+        )
+        self.assertEqual(
+            rows[10],
             [
                 "ACF+RET (k=12)",
                 "60.00% ± 5.00%",

@@ -44,9 +44,9 @@ METRICS = (
     "decode_trimmed_history_message_count",
 )
 
-GROUP_ORDER = {"G1": 1, "G2": 2, "G3": 3, "G4": 4, "G5": 5, "G6": 6, "G7": 7}
+GROUP_ORDER = {"G1": 1, "G2": 2, "G3": 3, "G4": 4, "G5": 5, "G6": 6, "G7": 7, "G8": 8}
 CONTROLLED_GROUPS = ("G2", "G3", "G4")
-REALISTIC_TASK_GROUPS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
+REALISTIC_TASK_GROUPS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8")
 REALISTIC_STEGO_GROUPS = ("G2", "G3", "G4", "G5", "G6", "G7")
 DRIFT_RECENT_PATTERN = re.compile(r"^drift_recent(\d+)$")
 _ANY_ACF_K = object()
@@ -391,6 +391,7 @@ CONTROLLED_PROTOCOL_SPECS: tuple[tuple[str, str, int | None], ...] = (
 
 REALISTIC_PROTOCOL_SPECS: tuple[tuple[str, str, int | None], ...] = (
     ("Normal (No Stego)", "G1", None),
+    ("Normal+RET", "G8", None),
     ("DISCOP", "G2", None),
     ("DISCOP+RET", "G6", None),
     ("METEOR", "G3", None),
@@ -454,13 +455,14 @@ def build_realistic_integrated_table_rows(summaries: list[dict[str, Any]]) -> li
             condition="no_drift",
             acf_k=acf_k,
         )
-        if group == "G1":
+        if group in {"G1", "G8"}:
             rows.append(
                 [
                     protocol,
                     mean_std_percent(row, "llm_judge_correct"),
                     mean_std_value(row, "llm_judge_score", precision=2),
                     mean_std_percent(row, "task_f1"),
+                    mean_std_value(row, "average_entropy", precision=4),
                     "---",
                     "---",
                     "---",
@@ -475,6 +477,7 @@ def build_realistic_integrated_table_rows(summaries: list[dict[str, Any]]) -> li
                 mean_std_percent(row, "llm_judge_correct"),
                 mean_std_value(row, "llm_judge_score", precision=2),
                 mean_std_percent(row, "task_f1"),
+                mean_std_value(row, "average_entropy", precision=4),
                 mean_std_percent(row, "ber"),
                 mean_std_percent(row, "decode_success"),
                 nominal_capacity_per_1k_value(row, precision=4),
@@ -625,13 +628,16 @@ def build_controlled_drift_severity_sweep_plot(summaries: list[dict[str, Any]]) 
                 "experiment": experiment,
                 "group": group,
                 "condition": condition,
+                "acf_k": row.get("acf_k"),
                 "decoder_sessions_kept": (
                     decoder_sessions_kept
                     if decoder_sessions_kept is not None
                     else int(config.LONGMEMEVAL_WINDOW_SESSIONS)
                 ),
                 "ber": ber,
+                "ber_std": safe_float(row.get("ber_std")),
                 "decode_success": safe_float(row.get("decode_success_mean")),
+                "decode_success_std": safe_float(row.get("decode_success_std")),
             }
         )
     points.sort(
@@ -681,7 +687,7 @@ def build_task_correctness_vs_reliability_plot(summaries: list[dict[str, Any]]) 
         no_drift = select_summary_row(summaries, experiment=experiment, group=group, condition="no_drift")
         llm_judge_correct = safe_float((no_drift or {}).get("llm_judge_correct_mean"))
         llm_judge_score = safe_float((no_drift or {}).get("llm_judge_score_mean"))
-        if group == "G1":
+        if group in {"G1", "G8"}:
             reliability = None
         else:
             ber = safe_float((no_drift or {}).get("ber_mean"))
@@ -695,7 +701,11 @@ def build_task_correctness_vs_reliability_plot(summaries: list[dict[str, Any]]) 
                 "llm_judge_score": llm_judge_score,
                 "legacy_task_f1": safe_float((no_drift or {}).get("task_f1_mean")),
                 "legacy_task_em": safe_float((no_drift or {}).get("task_em_mean")),
-                "point_role": "task_upper_bound_reference" if group == "G1" else "joint_task_protocol_point",
+                "point_role": (
+                    "task_upper_bound_reference"
+                    if group == "G1"
+                    else ("task_reference_with_retrieval" if group == "G8" else "joint_task_protocol_point")
+                ),
             }
         )
     return points
