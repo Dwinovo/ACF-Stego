@@ -643,20 +643,14 @@ def build_controlled_summary_note(
     summary = _compact_summary_sentence(best_content, tokenizer, max(8, int(note_max_tokens)))
     if not summary:
         return ""
-    return f"Memory note: {summary}"
+    return f"{config.LONGMEMEVAL_CONTROLLED_SUMMARY_NOTE_PREFIX} {summary}"
 
 
 def build_retrieved_reference_text(retrieval_hits: list[dict[str, Any]]) -> str:
     if not retrieval_hits:
         return ""
 
-    blocks = [
-        (
-            "Retrieved notes from older sessions. Use them as supporting evidence for the current question. "
-            "Not every note is relevant. If a retrieved note conflicts with a more recent explicit fact, "
-            "prefer the more recent explicit fact."
-        )
-    ]
+    blocks = [str(config.LONGMEMEVAL_RETRIEVAL_TOOL_PROMPT).strip()]
     for hit in retrieval_hits:
         blocks.append(
             "\n".join(
@@ -783,12 +777,6 @@ def _group_acf_k_values(
     if not spec.asymmetric:
         return (None,)
     values = tuple(int(value) for value in runtime.acf_k_values if int(value) > 0)
-    if experiment.key == "controlled_sweep" and spec.output_group == "G4":
-        if 16 in values:
-            return (16,)
-        if values:
-            return (max(values),)
-        return (16,)
     if values:
         return values
     return (STEGO_SECURE_PARAMETER,)

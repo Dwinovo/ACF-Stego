@@ -98,6 +98,7 @@ def remove_obsolete_artifacts(output_dir: Path, name_suffix: str) -> None:
         f"paper_table_realistic_protocol{name_suffix}.md",
         f"paper_table_realistic_llm{name_suffix}.md",
         f"paper_table_realistic_llm{name_suffix}.csv",
+        f"paper_table_ber_vs_decoder_sessions{name_suffix}.csv",
         f"plot_task_vs_reliability{name_suffix}.json",
         f"plot_ber_vs_condition{name_suffix}.json",
         f"plot_controlled_summary_asymmetry{name_suffix}.json",
@@ -134,6 +135,7 @@ def write_controlled_drift_ber_pdf(
     protocol_specs = (
         ("G2", "DISCOP", "#d62728", "o", (0, (3, 1.5)), None, 1.9, 6.8, 0.16, 4),  # red dashed
         ("G3", "METEOR", "#1f77b4", "o", (0, (3, 1.5)), None, 1.9, 6.8, 0.16, 4),  # blue dashed
+        ("G4", "ACF (k=8)", "#7f3fbf", "o", "-", 8, 1.9, 6.8, 0.12, 5),  # purple solid
         ("G4", "ACF (k=16)", "#2ca02c", "o", "-", 16, 1.9, 6.8, 0.12, 6),  # green
     )
 
@@ -283,6 +285,90 @@ def write_controlled_drift_ber_pdf(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
+    return True
+
+
+def write_controlled_drift_ber_source_table(
+    summaries: list[dict],
+    *,
+    output_path: Path,
+) -> bool:
+    points = analysis_tools.build_controlled_drift_severity_sweep_plot(summaries)
+    if not points:
+        return False
+
+    protocol_specs = (
+        ("G2", "DISCOP", None),
+        ("G3", "METEOR", None),
+        ("G4", "ACF (k=8)", 8),
+        ("G4", "ACF (k=16)", 16),
+    )
+    window_sessions = int(config.LONGMEMEVAL_WINDOW_SESSIONS)
+
+    headers = [
+        "Protocol",
+        "Group",
+        "DecoderSessionsKept",
+        "ContextTruncationDelta",
+        "BER(%, mean±std)",
+        "DSR(%, mean±std)",
+    ]
+    rows: list[list[str]] = []
+
+    for group, label, acf_k_filter in protocol_specs:
+        group_points = [
+            point
+            for point in points
+            if str(point.get("group", "")).strip() == group
+            and (
+                acf_k_filter is None
+                or int(point.get("acf_k", 0) or 0) == int(acf_k_filter)
+            )
+        ]
+        if not group_points:
+            continue
+
+        ber_by_truncation: dict[int, list[float]] = defaultdict(list)
+        ber_std_by_truncation: dict[int, list[float]] = defaultdict(list)
+        dsr_by_truncation: dict[int, list[float]] = defaultdict(list)
+        dsr_std_by_truncation: dict[int, list[float]] = defaultdict(list)
+
+        for point in group_points:
+            session_kept = int(point.get("decoder_sessions_kept", 0) or 0)
+            if session_kept <= 0:
+                continue
+            truncation = max(0, window_sessions - session_kept)
+            ber_by_truncation[truncation].append(max(0.0, float(point.get("ber", 0.0) or 0.0) * 100.0))
+            ber_std_by_truncation[truncation].append(max(0.0, float(point.get("ber_std", 0.0) or 0.0) * 100.0))
+            dsr_value = analysis_tools.safe_float(point.get("decode_success"))
+            if dsr_value is not None:
+                dsr_by_truncation[truncation].append(max(0.0, min(1.0, dsr_value)) * 100.0)
+            dsr_std_value = analysis_tools.safe_float(point.get("decode_success_std"))
+            if dsr_std_value is not None:
+                dsr_std_by_truncation[truncation].append(max(0.0, dsr_std_value) * 100.0)
+
+        for truncation in sorted(ber_by_truncation.keys()):
+            ber_mean = statistics.mean(ber_by_truncation[truncation]) if ber_by_truncation[truncation] else 0.0
+            ber_std = statistics.mean(ber_std_by_truncation[truncation]) if ber_std_by_truncation[truncation] else 0.0
+            dsr_mean = statistics.mean(dsr_by_truncation[truncation]) if dsr_by_truncation[truncation] else 0.0
+            dsr_std = (
+                statistics.mean(dsr_std_by_truncation[truncation]) if dsr_std_by_truncation[truncation] else 0.0
+            )
+            decoder_sessions_kept = max(0, window_sessions - truncation)
+            rows.append(
+                [
+                    label,
+                    group,
+                    str(int(decoder_sessions_kept)),
+                    str(int(truncation)),
+                    f"{ber_mean:.4f} ± {ber_std:.4f}",
+                    f"{dsr_mean:.4f} ± {dsr_std:.4f}",
+                ]
+            )
+
+    if not rows:
+        return False
+    analysis_tools.write_csv(output_path, headers, rows)
     return True
 
 
@@ -830,6 +916,12 @@ def main() -> None:
         realistic_headers,
         realistic_rows,
     )
+
+    ber_source_table_path = output_dir / f"paper_table_ber_vs_decoder_sessions{name_suffix}.csv"
+    if write_controlled_drift_ber_source_table(combined_summaries, output_path=ber_source_table_path):
+        print(f"Wrote BER-vs-decoder-sessions source table to: {ber_source_table_path}")
+    else:
+        print("Skipped BER-vs-decoder-sessions source table (insufficient controlled_sweep data).")
 
     figure_path = PROJECT_ROOT / config.FIGURE_V2_DIR / f"figure_ber_vs_decoder_sessions{name_suffix}.pdf"
     if write_controlled_drift_ber_pdf(combined_summaries, output_path=figure_path):

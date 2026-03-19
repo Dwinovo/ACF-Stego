@@ -34,33 +34,6 @@ ALLOWED_CONDITIONS = {
     "controlled": {"no_drift", "drift_recent3"},
 }
 
-JUDGE_SYSTEM_PROMPT = """
-You are a strict semantic evaluator for question answering.
-
-Your job is to judge whether the assistant's answer is semantically equivalent to the gold answer.
-
-Scoring rubric:
-- 2 = semantically correct and equivalent to the gold answer.
-- 1 = partially correct, incomplete, ambiguous, or contains the right clue but also extra uncertainty or conflict.
-- 0 = incorrect, contradicted, unsupported, or not an answer to the question.
-
-Rules:
-1. Judge semantic correctness, not style.
-2. Do not penalize brevity or verbosity by itself.
-3. If the assistant gives the correct answer inside a longer natural sentence, that can still be scored 2.
-4. If the assistant includes a correct answer but also adds a material contradiction, do not score 2.
-5. If multiple gold answers are provided, treat any semantically equivalent one as correct.
-6. Do not use outside world knowledge. Judge only from the question, gold answer(s), and assistant response.
-7. First produce a short reason, then decide the score.
-8. Output JSON only.
-
-Required JSON format:
-{
-  "reason": "short reason",
-  "score": 0,
-  "correct": 0
-}
-""".strip()
 TIMEOUT_ERROR_CLASS_NAMES = {
     "APITimeoutError",
     "ConnectTimeout",
@@ -196,11 +169,7 @@ def build_user_prompt(run_record: dict[str, Any], source_record: dict[str, Any] 
         "gold_answers": gold_answers,
         "assistant_response": assistant_answer,
     }
-    return (
-        "Evaluate the assistant response using the rubric from the system prompt.\n"
-        "Return JSON only.\n\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-    )
+    return f"{config.LLM_JUDGE_USER_PROMPT_PREFIX}\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
 
 def parse_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -276,7 +245,7 @@ def judge_record(
         client,
         run_id=run_id,
         messages=[
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "system", "content": config.LLM_JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(run_record, source_record)},
         ],
     )
