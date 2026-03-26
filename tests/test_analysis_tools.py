@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from core.tools import analysis_tools
@@ -274,7 +275,7 @@ class AnalysisToolsTest(unittest.TestCase):
         self.assertAlmostEqual(points[3]["communication_reliability"], 0.9)
         self.assertAlmostEqual(points[3]["legacy_task_f1"], 0.8)
 
-    def test_realistic_integrated_table_rows_include_nominal_and_effective_capacity(self) -> None:
+    def test_realistic_integrated_table_rows_include_nominal_capacity_and_itc(self) -> None:
         summaries = [
             {
                 "experiment": "realistic_cognitive_asymmetry",
@@ -307,7 +308,12 @@ class AnalysisToolsTest(unittest.TestCase):
             },
         ]
 
-        rows = analysis_tools.build_realistic_integrated_table_rows(summaries)
+        with mock.patch.object(
+            analysis_tools,
+            "load_realistic_bert_accuracy_by_protocol",
+            return_value={"Normal (No Stego)": "-", "Normal+RET": "-"},
+        ):
+            rows = analysis_tools.build_realistic_integrated_table_rows(summaries)
         self.assertEqual(
             rows[0],
             [
@@ -316,7 +322,7 @@ class AnalysisToolsTest(unittest.TestCase):
                 "1.20 ± 0.20",
                 "4.00% ± 1.00%",
                 "---",
-                "---",
+                "-",
                 "---",
                 "---",
             ],
@@ -329,7 +335,7 @@ class AnalysisToolsTest(unittest.TestCase):
                 "---",
                 "---",
                 "---",
-                "---",
+                "-",
                 "---",
                 "---",
             ],
@@ -341,10 +347,10 @@ class AnalysisToolsTest(unittest.TestCase):
                 "60.00% ± 5.00%",
                 "1.50 ± 0.10",
                 "7.00% ± 1.00%",
+                "---",
+                "---",
                 "1.00% ± 0.10%",
-                "99.00% ± 0.50%",
-                "250.0000 ± 20.0000",
-                "247.5000 ± 19.8394",
+                "229.8017",
             ],
         )
 

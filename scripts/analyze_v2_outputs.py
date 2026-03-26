@@ -904,10 +904,9 @@ def main() -> None:
         "Score",
         "F1",
         "Entropy(bits/token)",
+        "BERT",
         "BER",
-        "DSR",
-        "Nom.(bits/1kTok)",
-        "Eff.(bits/1kTok)",
+        "ITC(bits/1kTok)",
     ]
     realistic_rows = analysis_tools.build_realistic_integrated_table_rows(combined_summaries)
     realistic_csv_path = output_dir / f"paper_table_realistic_integrated{name_suffix}.csv"

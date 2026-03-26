@@ -9,6 +9,7 @@ STAGE="${EXPERIMENT_STAGE:-recommended}"
 RUN_CONTROLLED=1
 RUN_REALISTIC=1
 RUN_JUDGE=1
+RUN_BERT=1
 RUN_ANALYZE=1
 ANALYSIS_SUFFIX=""
 JUDGE_LIMIT=""
@@ -24,13 +25,15 @@ Default pipeline:
   1. controlled suite (drift -> summary -> sweep)
   2. realistic group1-group8
   3. realistic LLM judge
-  4. aggregate analysis and export two final CSV tables
+  4. realistic BERT binary detection tasks
+  5. aggregate analysis and export two final CSV tables
 
 Options:
   --stage <debug|pilot|formal|recommended>
   --skip-controlled
   --skip-realistic
   --skip-judge
+  --skip-bert
   --skip-analyze
   --analysis-suffix <name>
   --judge-limit <n>
@@ -43,6 +46,7 @@ Examples:
   bash scripts/run_v2_pipeline.sh --stage debug --judge-limit 20 --analysis-suffix debug
   bash scripts/run_v2_pipeline.sh --stage recommended
   bash scripts/run_v2_pipeline.sh --skip-judge
+  bash scripts/run_v2_pipeline.sh --skip-bert
 EOF
 }
 
@@ -63,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-judge)
       RUN_JUDGE=0
+      shift
+      ;;
+    --skip-bert)
+      RUN_BERT=0
       shift
       ;;
     --skip-analyze)
@@ -127,7 +135,8 @@ run_cmd() {
 }
 
 print_profile() {
-  python - <<'PY'
+  RUN_BERT_ENV="${RUN_BERT}" python - <<'PY'
+import os
 import config
 print(
     "[profile] "
@@ -140,6 +149,7 @@ print(
     f"window_sessions={config.LONGMEMEVAL_WINDOW_SESSIONS} "
     f"drift_keep_sessions={config.LONGMEMEVAL_DRIFT_KEEP_SESSIONS} "
     f"acf_k_values={config.LONGMEMEVAL_ACF_K_VALUES} "
+    f"run_bert={os.getenv('RUN_BERT_ENV', '')} "
     f"skip_existing_outputs={config.SKIP_EXISTING_OUTPUTS}"
 )
 PY
@@ -166,6 +176,10 @@ if [[ "${RUN_JUDGE}" -eq 1 ]]; then
     judge_cmd+=(--skip-existing)
   fi
   run_cmd "${judge_cmd[@]}"
+fi
+
+if [[ "${RUN_BERT}" -eq 1 ]]; then
+  run_cmd python scripts/run_bert_binary_experiment.py
 fi
 
 if [[ "${RUN_ANALYZE}" -eq 1 ]]; then

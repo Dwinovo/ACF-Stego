@@ -22,6 +22,7 @@ METRICS = (
     "encode_time_seconds",
     "decode_time_seconds",
     "embedding_capacity",
+    "itc",
     "consumed_bits",
     "secret_bits_budget",
     "compared_bits_len",
@@ -60,6 +61,26 @@ def safe_float(value: Any) -> float | None:
     if math.isnan(number) or math.isinf(number):
         return None
     return number
+
+
+def binary_entropy(probability: Any) -> float | None:
+    value = safe_float(probability)
+    if value is None:
+        return None
+    clamped = max(0.0, min(1.0, value))
+    if clamped in {0.0, 1.0}:
+        return 0.0
+    return -(clamped * math.log2(clamped) + (1.0 - clamped) * math.log2(1.0 - clamped))
+
+
+def information_theoretic_capacity(raw_capacity: Any, ber: Any) -> float | None:
+    capacity = safe_float(raw_capacity)
+    if capacity is None:
+        return None
+    entropy = binary_entropy(ber)
+    if entropy is None:
+        return None
+    return capacity * max(0.0, 1.0 - entropy)
 
 
 def normalize_acf_k(value: Any) -> int | None:
@@ -182,6 +203,11 @@ def normalize_record_units(record: dict[str, Any]) -> dict[str, Any]:
     cap = safe_float(normalized.get("embedding_capacity"))
     if cap is not None:
         normalized["embedding_capacity"] = cap
+    itc = information_theoretic_capacity(normalized.get("embedding_capacity"), normalized.get("ber"))
+    if itc is not None:
+        normalized["itc"] = itc
+    elif "itc" in normalized:
+        normalized.pop("itc", None)
     return normalized
 
 
@@ -343,28 +369,6 @@ def mean_std_percent(
     return f"{mean * scale:.{precision}f}% ± {std_value * scale:.{precision}f}%"
 
 
-def effective_capacity_from_nominal_and_dsr(
-    row: dict[str, Any] | None,
-    *,
-    precision: int = 4,
-    missing: str = "---",
-) -> str:
-    if row is None:
-        return missing
-    nominal_mean = safe_float(row.get("embedding_capacity_mean"))
-    nominal_std = safe_float(row.get("embedding_capacity_std"))
-    dsr_mean = safe_float(row.get("decode_success_mean"))
-    dsr_std = safe_float(row.get("decode_success_std"))
-    if nominal_mean is None or dsr_mean is None:
-        return missing
-    nominal_std_value = 0.0 if nominal_std is None else nominal_std
-    dsr_std_value = 0.0 if dsr_std is None else dsr_std
-
-    effective_mean = nominal_mean * dsr_mean
-    effective_std = math.sqrt((dsr_mean * nominal_std_value) ** 2 + (nominal_mean * dsr_std_value) ** 2)
-    return f"{effective_mean:.{precision}f} ± {effective_std:.{precision}f}"
-
-
 def nominal_capacity_per_1k_value(
     row: dict[str, Any] | None,
     *,
@@ -379,6 +383,24 @@ def nominal_capacity_per_1k_value(
         return missing
     nominal_std_value = 0.0 if nominal_std is None else nominal_std
     return f"{nominal_mean:.{precision}f} ± {nominal_std_value:.{precision}f}"
+
+
+def information_theoretic_capacity_value(
+    row: dict[str, Any] | None,
+    *,
+    precision: int = 4,
+    missing: str = "---",
+) -> str:
+    if row is None:
+        return missing
+    value = information_theoretic_capacity(row.get("embedding_capacity_mean"), row.get("ber_mean"))
+    if value is not None:
+        return f"{value:.{precision}f}"
+
+    itc_mean = safe_float(row.get("itc_mean"))
+    if itc_mean is not None:
+        return mean_std_value(row, "itc", precision=precision, missing=missing)
+    return missing
 
 
 CONTROLLED_PROTOCOL_SPECS: tuple[tuple[str, str, int | None], ...] = (
@@ -446,6 +468,7 @@ def build_controlled_cognitive_asymmetry_table_rows(summaries: list[dict[str, An
 
 def build_realistic_integrated_table_rows(summaries: list[dict[str, Any]]) -> list[list[str]]:
     experiment = "realistic_cognitive_asymmetry"
+    bert_accuracy_by_protocol = load_realistic_bert_accuracy_by_protocol()
     rows: list[list[str]] = []
     for protocol, group, acf_k in REALISTIC_PROTOCOL_SPECS:
         row = select_summary_row(
@@ -463,8 +486,7 @@ def build_realistic_integrated_table_rows(summaries: list[dict[str, Any]]) -> li
                     mean_std_value(row, "llm_judge_score", precision=2),
                     mean_std_percent(row, "task_f1"),
                     mean_std_value(row, "average_entropy", precision=4),
-                    "---",
-                    "---",
+                    bert_accuracy_by_protocol.get(protocol, "-"),
                     "---",
                     "---",
                 ]
@@ -478,13 +500,55 @@ def build_realistic_integrated_table_rows(summaries: list[dict[str, Any]]) -> li
                 mean_std_value(row, "llm_judge_score", precision=2),
                 mean_std_percent(row, "task_f1"),
                 mean_std_value(row, "average_entropy", precision=4),
+                bert_accuracy_by_protocol.get(protocol, "---"),
                 mean_std_percent(row, "ber"),
-                mean_std_percent(row, "decode_success"),
-                nominal_capacity_per_1k_value(row, precision=4),
-                effective_capacity_from_nominal_and_dsr(row, precision=4),
+                information_theoretic_capacity_value(row, precision=4),
             ]
         )
     return rows
+
+
+def load_realistic_bert_accuracy_by_protocol() -> dict[str, str]:
+    csv_path = Path(config.OUTPUT_V2_REALISTIC_DIR).parent / "bert_binary" / "bert_binary_results.csv"
+    if not csv_path.exists():
+        return {
+            "Normal (No Stego)": "-",
+            "Normal+RET": "-",
+        }
+
+    task_to_protocol = {
+        "Normal vs DISCOP": "DISCOP",
+        "Normal vs METEOR": "METEOR",
+        "Normal vs ACF (k=8)": "ACF (k=8)",
+        "Normal vs ACF (k=12)": "ACF (k=12)",
+        "Normal vs ACF (k=16)": "ACF (k=16)",
+        "Normal+RET vs DISCOP+RET": "DISCOP+RET",
+        "Normal+RET vs METEOR+RET": "METEOR+RET",
+        "Normal+RET vs ACF+RET (k=8)": "ACF+RET (k=8)",
+        "Normal+RET vs ACF+RET (k=12)": "ACF+RET (k=12)",
+        "Normal+RET vs ACF+RET (k=16)": "ACF+RET (k=16)",
+    }
+    results = {
+        "Normal (No Stego)": "-",
+        "Normal+RET": "-",
+    }
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                protocol = task_to_protocol.get(str(row.get("task_name", "")).strip())
+                if protocol is None:
+                    continue
+                accuracy = safe_float(row.get("test_accuracy"))
+                if accuracy is None:
+                    continue
+                results[protocol] = f"{accuracy * 100.0:.2f}%"
+    except Exception:
+        return {
+            "Normal (No Stego)": "-",
+            "Normal+RET": "-",
+        }
+    return results
 
 
 def build_controlled_table_rows(summaries: list[dict[str, Any]]) -> list[list[str]]:
